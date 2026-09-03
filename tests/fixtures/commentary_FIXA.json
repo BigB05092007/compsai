@@ -1,0 +1,58 @@
+{
+  "ticker": "FIXA",
+  "normalization_items": [
+    {
+      "description": "Orchard Networks patent litigation settlement",
+      "amount_usd_m": 410.0,
+      "fiscal_year": 2024,
+      "direction": "add_back",
+      "source_quote": "one-time charge of $410 million to settle the Orchard Networks patent litigation",
+      "verified": true,
+      "quote_word_count": 12
+    },
+    {
+      "description": "Restructuring charge - consolidation of European distribution operations",
+      "amount_usd_m": 185.0,
+      "fiscal_year": 2024,
+      "direction": "add_back",
+      "source_quote": "Restructuring charges of $185 million in fiscal 2024",
+      "verified": true,
+      "quote_word_count": 8
+    },
+    {
+      "description": "Gain on sale of Grove accessories business",
+      "amount_usd_m": 260.0,
+      "fiscal_year": 2024,
+      "direction": "deduct",
+      "source_quote": "recognized a pre-tax gain of $260 million",
+      "verified": true,
+      "quote_word_count": 7
+    },
+    {
+      "description": "Goodwill impairment - Home Devices reporting unit",
+      "amount_usd_m": 95.0,
+      "fiscal_year": 2023,
+      "direction": "add_back",
+      "source_quote": "goodwill impairment charge of $95 million",
+      "verified": true,
+      "quote_word_count": 6
+    }
+  ],
+  "premium_discount": {
+    "growth_outlook": "Management guides to low-to-mid single digit net sales growth in fiscal 2025, with Services growing in the low double digits and an AI-feature-driven Orchard Phone upgrade cycle, after 2% growth ($391.0 billion) in fiscal 2024.",
+    "margin_trajectory": "Gross margin expanded 210 basis points to 46.2% on the Services mix shift (Services now 25% of sales at a 73.9% gross margin); guidance of 46% to 47% and modest operating margin expansion implies further, slower, improvement as component costs rise.",
+    "key_risks": [
+      "Greater China net sales fell 8% amid renminbi weakness and share loss",
+      "Regulatory or judicial changes to the default search licensing arrangement could cut Services revenue and margin",
+      "Antitrust investigations and litigation over the app distribution platform",
+      "Concentrated outsourced manufacturing in Asia exposed to tariffs and trade disputes"
+    ],
+    "premium_or_discount": "premium",
+    "rationale": "FIXA trades at 24.5x EV/EBITDA and 30.0x P/E versus peer medians of 18.0x and 24.0x. The premium is justified by a 46.2% gross margin that is still expanding, a Services annuity that now represents a quarter of revenue at a 74% gross margin, and $118.3 billion of operating cash flow funding $110.2 billion of capital returns; the modest top-line growth guide and China exposure argue against a wider gap."
+  },
+  "source_form": "10-K",
+  "source_url": "https://www.sec.gov/Archives/edgar/data/1/000000000124000010/fixa-20240928.htm",
+  "filing_date": "2024-11-01",
+  "model": "fixture",
+  "errors": []
+}
