@@ -1,0 +1,7 @@
+{
+ "ticker": "FIXA",
+ "price": 200.0,
+ "shares_outstanding": 15000.0,
+ "currency": "USD",
+ "as_of": "2025-08-29"
+}
