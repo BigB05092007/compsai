@@ -1,0 +1,27 @@
+# Named peer groups. Each entry has:
+#   sector_type: industrial | bank
+#     industrial -> EV/Revenue, EV/EBITDA, P/E
+#     bank       -> P/E, P/TBV (EV-based multiples are meaningless for financials:
+#                   debt is a bank's raw material, not a financing choice)
+#   tickers: list of US-listed tickers (SEC EDGAR + Yahoo Finance symbols)
+#
+# A bare list (name: [A, B, C]) is also accepted and treated as sector_type: industrial.
+
+us_large_software:
+  sector_type: industrial
+  tickers: [MSFT, ORCL, CRM, ADBE, NOW, INTU]
+
+us_banks:
+  sector_type: bank
+  tickers: [JPM, BAC, WFC, C, GS, MS]
+
+canadian_cross_listed:
+  # Cross-listed Canadian filers mostly file 40-F/20-F (often IFRS tags) rather than 10-K.
+  # edgar.py accepts those forms and IFRS fallback tags, but coverage is best-effort:
+  # quarterly 6-K filings carry no XBRL, so TTM falls back to the latest fiscal year.
+  sector_type: industrial
+  tickers: [SHOP, CP, CNQ, SU, BNS, RY]
+
+consumer_staples:
+  sector_type: industrial
+  tickers: [PG, KO, PEP, CL, KMB, GIS]

@@ -1,0 +1,27 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# generated output and caches (regenerable; never commit)
+output/*
+!output/.gitkeep
+data/cache/*
+!data/cache/.gitkeep
+*.xlsx
+!docs/*.png
+
+# python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# editors / OS
+.DS_Store
+.vscode/
+.idea/
