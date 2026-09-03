@@ -436,6 +436,9 @@ def test_get_json_sets_headers_and_raises_on_non_200(monkeypatch):
 
     monkeypatch.setattr(edgar.requests, "get", fake_get)
     monkeypatch.setattr(edgar.time, "sleep", lambda s: None)
+    # Pin the User-Agent here so the assertion does not depend on the caller's environment
+    # (CI sets its own SEC_USER_AGENT; conftest only provides a default).
+    monkeypatch.setenv("SEC_USER_AGENT", "CompsAI test@example.com")
     with pytest.raises(RuntimeError, match="403"):
         edgar._get_json("https://data.sec.gov/x.json")
     assert seen["headers"]["User-Agent"] == "CompsAI test@example.com"
