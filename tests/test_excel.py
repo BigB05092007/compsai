@@ -427,8 +427,9 @@ def test_inputs_block_layout(industrial_wb):
     assert ws.cell(row=b + 7, column=3).value == "2026-06-30"
     assert all(ws.cell(row=b + 8, column=c).value is None for c in range(1, 19))
     # EBITDA and TBV are formulas (black); the rest are blue hardcodes
-    assert ws.cell(row=b + 7, column=7).value == f"=E{b + 7}+F{b + 7}"
-    assert ws.cell(row=b + 7, column=18).value == f"=O{b + 7}-P{b + 7}-Q{b + 7}"
+    r = b + 7
+    assert ws.cell(row=r, column=7).value == f'=IF(AND(ISNUMBER(E{r}),ISNUMBER(F{r})),E{r}+F{r},"")'
+    assert ws.cell(row=r, column=18).value == f'=IF(ISNUMBER(O{r}),O{r}-P{r}-Q{r},"")'
     assert ws.cell(row=b + 7, column=7).font.color.rgb.endswith("000000")
     for col in (4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17):
         cell = ws.cell(row=b + 7, column=col)

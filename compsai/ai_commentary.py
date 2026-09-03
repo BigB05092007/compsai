@@ -30,7 +30,7 @@ import os
 import re
 import string
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 import anthropic

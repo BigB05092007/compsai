@@ -404,6 +404,7 @@ def _format_for_print(comps: pd.DataFrame) -> pd.DataFrame:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the CompsAI comparable-company pipeline.")
     parser.add_argument("--peer-set", help="name from config/peer_sets.yaml")
+    parser.add_argument("--name", help="label for a custom run (used in the workbook file name)")
     parser.add_argument("--tickers", help="comma-separated tickers (overrides / extends the peer set)")
     parser.add_argument("--target", help="target company ticker (gets the football field)")
     parser.add_argument("--sector-type", choices=sorted(MULTIPLES_BY_SECTOR), help="industrial | bank")
@@ -431,6 +432,8 @@ def main(argv: list[str] | None = None) -> int:
         tickers += [t for t in args.tickers.split(",") if t.strip()]
     if not tickers:
         parser.error("give --peer-set and/or --tickers")
+    if args.name:
+        peer_set_name = args.name
 
     result = run_pipeline(
         tickers, peer_set_name=peer_set_name, target=args.target, sector_type=sector_type or "industrial",

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import textwrap
-from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
@@ -272,6 +271,14 @@ def test_cli_offline_run(tmp_path, capsys):
     assert "Football field: FIXA" in out
     assert "Workbook:" in out
     assert list(tmp_path.glob("comps_us_large_software_*.xlsx"))
+
+
+def test_cli_name_flag_labels_a_custom_run(tmp_path, capsys):
+    rc = pipeline.main(["--tickers", "FIXC,FIXA", "--target", "FIXC", "--sector-type", "bank", "--name", "demo_bank",
+                        "--offline", "--no-ai", "--out", str(tmp_path)])
+    assert rc == 0
+    assert "=== Comps: demo_bank (bank)" in capsys.readouterr().out
+    assert list(tmp_path.glob("comps_demo_bank_*.xlsx"))
 
 
 def test_cli_requires_tickers_or_peer_set():

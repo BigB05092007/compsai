@@ -31,7 +31,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from compsai.pipeline import STAGES, load_peer_sets, run_pipeline  # noqa: E402
+from compsai.pipeline import load_peer_sets, run_pipeline  # noqa: E402
 from compsai.valuation import MULTIPLE_LABELS, MULTIPLES_BY_SECTOR  # noqa: E402
 
 STAGE_LABELS = {

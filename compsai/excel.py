@@ -50,6 +50,7 @@ from openpyxl import Workbook
 from openpyxl.chart import BarChart, Reference
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.properties import PageSetupProperties
 from openpyxl.worksheet.worksheet import Worksheet
 
 import compsai
@@ -311,6 +312,15 @@ def _put(
     return cell
 
 
+def _print_setup(ws: Worksheet, print_area: str) -> None:
+    """Landscape, fit to one page wide (any number of pages tall), fixed print area."""
+    ws.print_area = print_area
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+
+
 def _set_widths(ws: Worksheet, widths: dict[str, float]) -> None:
     for letter, width in widths.items():
         ws.column_dimensions[letter].width = width
@@ -406,15 +416,28 @@ def _currency_from(fin: pd.DataFrame) -> str | None:
     return None
 
 
+def _ebitda_formula(r: int) -> str:
+    """Inputs!G = EBIT + D&A, or "" when either input is blank (mirrors NaN in valuation.py)."""
+    return f'=IF(AND(ISNUMBER(E{r}),ISNUMBER(F{r})),E{r}+F{r},"")'
+
+
+def _tbv_formula(r: int) -> str:
+    """Inputs!R = total equity - goodwill - intangibles, or "" when equity is blank."""
+    return f'=IF(ISNUMBER(O{r}),O{r}-P{r}-Q{r},"")'
+
+
 def _write_financial_row(ws: Worksheet, r: int, row: pd.Series) -> None:
     """Write one FY/TTM line: blue hardcodes plus the two derived black formulas."""
     for col, (key, _header, kind) in enumerate(INPUTS_HEADERS, start=1):
         if key == "ebitda":
-            # EBITDA = EBIT + D&A (operating income plus depreciation & amortization)
-            _put(ws, r, col, f"=E{r}+F{r}", kind=kind)
+            # EBITDA = EBIT + D&A (operating income plus depreciation & amortization).
+            # Blank when either component is missing so it matches valuation.py (NaN) instead
+            # of silently collapsing to EBIT or 0; downstream IFERROR()s then show "n/a".
+            _put(ws, r, col, _ebitda_formula(r), kind=kind)
         elif key == "tangible_book_value":
-            # TBV = total equity - goodwill - intangibles (book equity net of intangibles)
-            _put(ws, r, col, f"=O{r}-P{r}-Q{r}", kind=kind)
+            # TBV = total equity - goodwill - intangibles (book equity net of intangibles);
+            # blank when equity is missing (goodwill/intangibles default to 0 like edgar.py).
+            _put(ws, r, col, _tbv_formula(r), kind=kind)
         else:
             value = row.get(key)
             if key == "fiscal_year" and _clean(value) is not None:
@@ -429,9 +452,9 @@ def _write_ttm_as_fy_link(ws: Worksheet, r: int, fy_row: int) -> None:
         if key == "period_type":
             _put(ws, r, col, "TTM (=FY)")
         elif key == "ebitda":
-            _put(ws, r, col, f"=E{r}+F{r}", kind=kind)  # EBITDA = EBIT + D&A
+            _put(ws, r, col, _ebitda_formula(r), kind=kind)  # EBITDA = EBIT + D&A
         elif key == "tangible_book_value":
-            _put(ws, r, col, f"=O{r}-P{r}-Q{r}", kind=kind)  # TBV = equity - goodwill - intangibles
+            _put(ws, r, col, _tbv_formula(r), kind=kind)  # TBV = equity - goodwill - intangibles
         else:
             _put(ws, r, col, f"={letter}{fy_row}", kind=kind)
 
@@ -561,6 +584,8 @@ def _write_comps(
     _set_widths(ws, widths)
     ws.row_dimensions[COMPS_HEADER_ROW].height = 30
     ws.freeze_panes = ws.cell(row=COMPS_FIRST_COMPANY_ROW, column=1).coordinate
+    # Print setup: one landscape page wide, helper columns left off the printed page.
+    _print_setup(ws, f"A1:{get_column_letter(n_visible)}{max(stats_rows.values())}")
 
     return {
         "first_row": first_row,
