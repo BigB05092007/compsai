@@ -19,6 +19,7 @@ from __future__ import annotations
 import math
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 import altair as alt
@@ -154,20 +155,27 @@ def main() -> None:
     st.title("CompsAI — comparable company analysis")
     st.caption("SEC EDGAR XBRL → trading multiples → banker-formatted Excel → Claude-drafted commentary")
 
-    if "result" not in st.session_state:
-        st.session_state["result"] = None
+    for key, default in (("result", None), ("xlsx_bytes", None), ("xlsx_name", None)):
+        if key not in st.session_state:
+            st.session_state[key] = default
 
     # ---- Sidebar: inputs ----------------------------------------------------------------
     peer_sets = load_peer_sets()
+
+    def _sync_sector() -> None:
+        # A keyed selectbox keeps its own state across reruns, so the sector default has to
+        # be pushed into session state whenever the peer set changes (banks -> P/E, P/TBV).
+        chosen = st.session_state.get("peer_set")
+        st.session_state["sector_type"] = peer_sets[chosen].sector_type if chosen in peer_sets else "industrial"
+
     with st.sidebar:
         st.header("Inputs")
-        choice = st.selectbox("Peer set", ["(custom tickers)"] + list(peer_sets), key="peer_set")
+        choice = st.selectbox("Peer set", ["(custom tickers)"] + list(peer_sets), key="peer_set",
+                              on_change=_sync_sector)
         custom = st.text_input("Peer tickers (comma-separated)", key="custom_tickers",
                                placeholder="MSFT, ORCL, CRM")
         target = st.text_input("Target ticker (gets the football field)", key="target", placeholder="MSFT")
-        default_sector = peer_sets[choice].sector_type if choice in peer_sets else "industrial"
         sector_type = st.selectbox("Sector type", list(MULTIPLES_BY_SECTOR), key="sector_type",
-                                   index=list(MULTIPLES_BY_SECTOR).index(default_sector),
                                    help="industrial: EV/Revenue, EV/EBITDA, P/E · bank: P/E, P/TBV")
         with_ai = st.checkbox("Generate AI commentary (needs ANTHROPIC_API_KEY)", key="with_ai",
                               value=bool(os.environ.get("ANTHROPIC_API_KEY")))
@@ -198,10 +206,13 @@ def main() -> None:
                     st.caption(f"{label}: {message}")
 
                 try:
+                    # A private output directory per run: the app may serve several users at
+                    # once, and the default date-keyed file name would let them overwrite each
+                    # other's workbook.
                     result = run_pipeline(
                         tickers, peer_set_name=peer_set_name, target=target.strip() or None,
                         sector_type=sector_type, with_commentary=with_ai, progress=progress,
-                        offline=offline,
+                        offline=offline, out_dir=Path(tempfile.mkdtemp(prefix="compsai-app-")),
                     )
                 except Exception as exc:  # noqa: BLE001 - show the reason instead of a traceback page
                     status.update(label="Run failed", state="error")
@@ -210,6 +221,14 @@ def main() -> None:
                     return
                 status.update(label="Done", state="complete", expanded=False)
                 st.session_state["result"] = result
+                # Read the workbook once, now: the bytes stay with this session even if the
+                # file is later cleaned up or another run reuses the name.
+                if result.xlsx_path and Path(result.xlsx_path).exists():
+                    st.session_state["xlsx_bytes"] = Path(result.xlsx_path).read_bytes()
+                    st.session_state["xlsx_name"] = Path(result.xlsx_path).name
+                else:
+                    st.session_state["xlsx_bytes"] = None
+                    st.session_state["xlsx_name"] = None
 
     result = st.session_state["result"]
     if result is None:
@@ -265,11 +284,11 @@ def main() -> None:
                 if res.source_url:
                     st.caption(f"Source: {res.source_form} filed {res.filing_date} — {res.source_url}")
 
-    if result.xlsx_path and Path(result.xlsx_path).exists():
+    if st.session_state.get("xlsx_bytes"):
         st.download_button(
             "Download Excel comps sheet",
-            data=Path(result.xlsx_path).read_bytes(),
-            file_name=Path(result.xlsx_path).name,
+            data=st.session_state["xlsx_bytes"],
+            file_name=st.session_state["xlsx_name"] or "comps.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 

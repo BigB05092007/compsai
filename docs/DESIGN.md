@@ -45,7 +45,8 @@ total_equity, goodwill, intangibles, tangible_book_value, currency
   `n_years` defaults to 4 because a 3-year CAGR needs four year-end points
   (FY_t and FY_t-3). The comps table shows 3 years; the fourth only feeds the CAGR.
 * `ebitda = ebit + da` (EBITDA = operating income + depreciation & amortization).
-* `tangible_book_value = total_equity - goodwill - intangibles` (goodwill/intangibles default 0 when absent).
+* `tangible_book_value = total_equity - preferred - goodwill - intangibles` (tangible *common*
+  equity, so P/TBV is the per-common-share ratio; preferred/goodwill/intangibles default 0 when absent).
 * `minority_interest`, `preferred`, `goodwill`, `intangibles` default to `0.0` when no tag exists
   (absence means the company has none). Everything else is `NaN` when missing.
 * `currency`: 3-letter code of the monetary unit used (normally `"USD"`).
@@ -78,7 +79,8 @@ CONCEPT_TAGS = {
                       "ifrs-full:DepreciationAndAmortisationExpense"],
     "net_income":    ["us-gaap:NetIncomeLoss", "us-gaap:ProfitLoss",
                       "ifrs-full:ProfitLossAttributableToOwnersOfParent", "ifrs-full:ProfitLoss"],
-    "eps_diluted":   ["us-gaap:EarningsPerShareDiluted", "ifrs-full:DilutedEarningsLossPerShare"],
+    "eps_diluted":   ["us-gaap:EarningsPerShareDiluted", "us-gaap:EarningsPerShareBasicAndDiluted",
+                      "ifrs-full:DilutedEarningsLossPerShare", "ifrs-full:BasicAndDilutedEarningsLossPerShare"],
     "cash":          ["us-gaap:CashAndCashEquivalentsAtCarryingValue",
                       "us-gaap:CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
                       "ifrs-full:CashAndCashEquivalents"],
@@ -101,19 +103,24 @@ Convention (decision D1/D2 in DECISIONS.md: operating leases excluded; finance l
 only if embedded in the debt tags):
 
 ```
+combined          := us-gaap:DebtLongtermAndShorttermCombinedAmount   # already the total
 LongTermDebt      := us-gaap:LongTermDebt            # taxonomy definition INCLUDES the current portion
+                     else us-gaap:LongTermDebtAndCapitalLeaseObligations (same meaning, incl. finance leases)
 noncurrent        := us-gaap:LongTermDebtNoncurrent
 current           := us-gaap:DebtCurrent   (already includes short-term borrowings)
                      else us-gaap:LongTermDebtCurrent
-short_term        := us-gaap:ShortTermBorrowings + us-gaap:CommercialPaper   (each 0 if absent)
+short_term        := us-gaap:ShortTermBorrowings, else us-gaap:CommercialPaper, else 0
+                     -- NEVER both: CommercialPaper is one kind of ShortTermBorrowings
                      -- only added when `current` did NOT come from DebtCurrent (avoid double count)
 
-if LongTermDebt exists:      total = LongTermDebt + short_term
+if combined exists:          total = combined
+elif LongTermDebt exists:    total = LongTermDebt + short_term
 elif noncurrent exists:      total = noncurrent + (current or 0) + short_term_if_applicable
 elif current exists:         total = current + short_term_if_applicable
 elif ifrs-full:Borrowings:   total = Borrowings
 elif ifrs LongtermBorrowings/ShorttermBorrowings exist: total = their sum
-else:                        NaN
+else:                        NaN -> then, if the period has a balance sheet (cash or equity
+                             reported), total_debt = 0 "debt-free" with a warning naming the periods
 ```
 
 ### Fiscal-year selection algorithm
@@ -123,11 +130,13 @@ Facts live at `facts["facts"][namespace][Tag]["units"][unit]` as a list of
 the API, so no dimension handling is needed.
 
 1. **Annual duration facts** (income statement / cash flow concepts): keep facts with
-   `form in {"10-K", "10-K/A", "20-F", "40-F"}`, both `start` and `end`, and duration
-   350–380 days. Group by `end`.
-   * Label: `fiscal_year` = the `fy` field of the fact with the **earliest** `filed` date
-     for that `end` (the first 10-K that reported the period is the company's own label;
-     later 10-Ks carry the same period as a prior-year comparative under a newer `fy`).
+   `form in {"10-K", "10-K/A", "10-KT", "10-KT/A", "20-F", "20-F/A", "40-F", "40-F/A"}`, both
+   `start` and `end`, and duration 350–380 days. Group by `end`.
+   * Label: take the fact with the **earliest** `filed` date for that `end` (the first annual
+     report that showed the period). Its `fy` is that *filing's* fiscal year; the period is
+     labelled `fy − k` where `k` is the number of years the period sits before the filing's own
+     (latest) annual period. For an established filer `k = 0` (its own 10-K); for a young
+     company whose first 10-K carries three years, the comparatives get `fy−1`, `fy−2`.
      Fallback when `fy` is missing: `end.year`.
    * Value: from the fact with the **latest** `filed` date for that `end` (most recent
      restatement). Ties: last one in the list.
@@ -146,10 +155,17 @@ the API, so no dimension handling is needed.
      and duration within ±10 days of `d`.
    * `TTM = FY_latest + YTD_cur − YTD_prior`  (standard "roll-forward" TTM construction;
      for EPS this is an approximation that ignores share-count drift and is documented as such).
+   * **Share-basis check**: if the diluted share count moved outside `[0.8, 1.25]×` between the
+     latest 10-K and the latest 10-Q (a stock split: the 10-Q restates its comparatives
+     post-split while the FY EPS is pre-split), TTM EPS = TTM net income ÷ latest diluted
+     shares instead, with a warning.
    * No `YTD_cur` at all → TTM row = latest FY values, warning `"no 10-Q after latest 10-K; TTM = FY"`.
    * `YTD_cur` present but `YTD_prior` (or `YTD_cur`) missing for a concept → that concept's
      TTM falls back to its FY value and a warning names the concept.
-   * TTM balance-sheet columns = the **latest** instant fact (any form) with `E_fy <= end <= YTD_cur.end`.
+   * TTM balance-sheet columns all come from **one balance sheet**: the latest date after
+     `E_fy` (up to `YTD_cur.end`) at which cash or total equity is reported. Every instant
+     concept and every debt component is read at that date (±7 days); a concept missing there
+     falls back to its latest earlier value with a warning naming the concept.
    * TTM `diluted_shares` = the `YTD_cur`-matching fact if present, else the FY value.
    * TTM `period_end` = `YTD_cur.end`.
 4. **Units**: monetary → prefer `"USD"`, else the first key that is a 3-letter uppercase
@@ -202,6 +218,8 @@ source ("yfinance" | "yfinance+xbrl" | "xbrl" | "override" | "fixture"), as_of (
   wrapped in `try/except Exception` and logged; never let yfinance crash the pipeline.
 * Shares fallback: XBRL `dei:EntityCommonStockSharesOutstanding` from `facts`, latest `end`;
   if several facts share that same `end` and `filed` (multiple share classes), sum them.
+  The cover-page total also **replaces** a Yahoo count that is below 90% of it: Yahoo reports
+  only the quoted share class (GOOGL ≈ 5.8bn of ≈ 12.1bn), which would halve market cap and EV.
 * `overrides` (`{"price": ..., "shares_outstanding": ...}`) win over everything; `source="override"`.
 * Missing price → `price = NaN`, `market_cap = NaN` (never invent a price).
 * Cache `market_{TICKER}.json`, TTL 12 h. Offline mode reads `market_{TICKER}.json` from the
@@ -235,7 +253,8 @@ revenue_growth_1y, revenue_growth_3y_cagr, p_tbv, price, note
   * `ebitda_margin = ebitda_ttm / revenue_ttm`; `net_margin = net_income_ttm / revenue_ttm`.
   * `revenue_growth_1y = FY[-1] / FY[-2] − 1`; `revenue_growth_3y_cagr = (FY[-1] / FY[-4]) ** (1/3) − 1`
     (NaN if fewer than 4 FY rows). Growth uses fiscal years, not TTM.
-  * `p_tbv = market_cap / tangible_book_value` (TTM/latest balance sheet).
+  * `p_tbv = market_cap / tangible_book_value` (TTM/latest balance sheet; TBV is tangible
+    common equity, i.e. net of preferred, so the ratio is per common share).
   * **Bank branch** (`sector_type == "bank"`): `ev`, `ev_revenue_ttm`, `ev_ebitda_ttm`,
     `ebitda_margin` are NaN and the note says EV-based multiples are not meaningful for banks.
   * `note` is a `"; "`-joined string of every caveat (exclusions, fallbacks); `""` when clean.
@@ -331,7 +350,9 @@ b+7 : TTM row
 b+8 : blank
 ```
 
-Hardcodes (blue): D,E,F,H,I,J,K,L,M,N,O,P,Q. Formulas (black): `G = E + F` (EBITDA), `R = O − P − Q` (TBV).
+Hardcodes (blue): D,E,F,H,I,J,K,L,M,N,O,P,Q. Formulas (black): `G = IF(AND(ISNUMBER(E),ISNUMBER(F)),E+F,"")`
+(EBITDA, blank when a component is missing — mirrors NaN in Python), `R = IF(ISNUMBER(O),O−M−P−Q,"")`
+(tangible common equity).
 
 ### Sheet "Comps"
 
@@ -344,13 +365,18 @@ Columns depend on sector type (look columns up by header text in tests; excel.py
 
 Every numeric cell is a **formula into Inputs** (company block start `b`, TTM row `t = b+7`, newest FY `y = b+6`, prior FY `b+5`, oldest FY `b+3`):
 
+Root inputs are ISNUMBER-guarded so a blank cell yields "n/a" (Excel would otherwise read it as
+0), exactly where valuation.py yields NaN:
+
 ```
-Price          = Inputs!$B${b+1}
-Market Cap     = Inputs!$B${b+1}*Inputs!$D${b+1}
-EV             = {MarketCap} + Inputs!$J$t + Inputs!$L$t + Inputs!$M$t - Inputs!$K$t
+Price          = IF(ISNUMBER(B),B,"n/a")                                   with B = Inputs!$B${b+1}
+Market Cap     = IF(AND(ISNUMBER(B),ISNUMBER(D)),B*D,"n/a")                  D = Inputs!$D${b+1}
+EV             = IF(AND(ISNUMBER(B),ISNUMBER(D),ISNUMBER(J),ISNUMBER(K)),
+                    B*D + J + Inputs!$L$t + Inputs!$M$t - K, "n/a")           J/K = Inputs!$J$t / $K$t
 EV/Revenue     = IFERROR({EV}/Inputs!$D$t,"n/a")
 EV/EBITDA      = IFERROR({EV}/Inputs!$G$t,"n/a")
-P/E            = IFERROR({Price}/Inputs!$I$t,"n/a")
+P/E            = IFERROR(IF(ISNUMBER(Inputs!$I$t),{Price}/Inputs!$I$t,{MarketCap}/Inputs!$H$t),"n/a")
+                 (no diluted EPS -> market cap / net income, the valuation.py fallback)
 P/TBV          = IFERROR({MarketCap}/Inputs!$R$t,"n/a")
 EBITDA margin  = IFERROR(Inputs!$G$t/Inputs!$D$t,"n/a")
 Net margin     = IFERROR(Inputs!$H$t/Inputs!$D$t,"n/a")
@@ -370,10 +396,13 @@ Stats are computed only for the sector's multiples (`MULTIPLES_BY_SECTOR`). Free
 
 Table (formulas, one row per multiple in `MULTIPLES_BY_SECTOR[sector]`):
 `Method | Target metric | Metric value | Low multiple (25th) | High multiple (75th) | Implied EV low | Implied EV high | Implied equity low | Implied equity high | Implied price low | Implied price high`,
-where low/high multiples link to the Comps stats cells and metric values link to Inputs.
-Also `Current price` linked to Inputs. Chart: horizontal stacked `BarChart` (`type="bar"`, `grouping="stacked"`,
-`overlap=100`): series 1 = implied price low with `graphicalProperties.noFill = True`, series 2 = high − low
-(a helper column), categories = method names, title `Implied share price ({ticker})`.
+where low/high multiples link to the Comps stats cells and metric values link to Inputs
+(ISNUMBER-guarded; the P/E row switches to net income when diluted EPS is blank, like
+`implied_valuation`). Also `Current price` linked to Inputs. Chart: horizontal stacked `BarChart`
+(`type="bar"`, `grouping="stacked"`, `overlap=100`): series 1 = a helper `MAX(low,0)` with
+`graphicalProperties.noFill = True`, series 2 = a helper `MAX(high,0) − MAX(low,0)` (a stacked bar
+cannot start below the axis, so a negative implied price draws nothing), categories = method names,
+title `Implied share price ({ticker})`.
 
 ### Sheet "Commentary"
 
@@ -386,12 +415,13 @@ then `Source: {form} filed {filing_date} — {url}`. If a company has no comment
 ## 7. Module 4: `compsai/ai_commentary.py`
 
 ```python
-SYSTEM_PROMPT: str                      # the Section 6 text, verbatim
+SYSTEM_PROMPT: str                      # exactly the four lines below (from the brief's prompt-design notes)
 DEFAULT_MODEL = "claude-sonnet-4-6"     # override with env COMPSAI_MODEL
 MAX_CHARS = 350_000                     # ≈ 85–90k tokens at ~4 chars/token, under the 100k/call target
 MAX_CHUNKS = 2
 
-get_latest_annual_filing(submissions: dict, cik: str) -> FilingRef   # 10-K first, then 20-F/40-F
+get_latest_annual_filing(submissions: dict, cik: str, page_loader=None) -> FilingRef   # 10-K first, then 20-F/40-F;
+                                        # pages into filings.files[] when `recent` (~1,000 filings) holds none
 download_filing_text(ref: FilingRef, refresh: bool = False) -> str    # cached data/cache/filings/{accession}.txt
 html_to_text(html: str) -> str
 extract_section(text: str, item: str) -> str                          # item in {"1A", "7"}; "" if not found
@@ -408,13 +438,22 @@ generate_commentary(company: CompanyData, peer_median: pd.Series, sector_type: s
                     client=None, refresh: bool = False, offline: bool = False) -> CommentaryResult
 ```
 
+* `SYSTEM_PROMPT` is exactly:
+  `You are a sell-side equity research associate. You are given a section of a 10-K.` /
+  `Return only valid JSON matching the schema below. No preamble, no markdown.` /
+  `If you cannot find relevant information, return an empty list or "unknown".` /
+  `Never invent numbers. Every item must include a short verbatim source_quote.`
 * `FilingRef` dataclass: `form, accession (no dashes), primary_document, filing_date, report_date, url`
   with `url = https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession}/{primary_document}`.
+* `download_filing_text` decodes the response **bytes** through BeautifulSoup (EDGAR sends no
+  charset header; `requests.text` would default to latin-1 and mangle curly quotes).
 * `html_to_text`: BeautifulSoup `html.parser`; drop `script`, `style`, and inline-XBRL `ix:header`;
   `get_text("\n")`; normalise `\xa0` → space; collapse runs of spaces; collapse 3+ newlines to 2.
-* `extract_section`: case-insensitive regexes tolerant of `Item 7.`, `ITEM 7 –`, `Item 7:`, smart quotes.
-  Start/end pairs: `1A` → start `Item 1A ... Risk Factors`, end `Item 1B` (fallback `Item 2`);
-  `7` → start `Item 7 ... Management's Discussion`, end `Item 7A` (fallback `Item 8`).
+* `extract_section`: case-insensitive regexes tolerant of `Item 7.`, `ITEM 7 –`, `Item 7:`, smart quotes,
+  and the combined `Item 7 and 7A.` heading. End headings are tried in order — titled first
+  (`Item 1B ... Unresolved`, `Item 2 ... Properties`; `Item 7A ... Quantitative`, `Item 8 ... Financial
+  Statements`), then the bare `Item 1B`/`Item 2`/`Item 7A`/`Item 8` — so a hyperlinked
+  cross-reference ("see Item 7A" on its own line) cannot end the section early.
   Among all start matches, choose the one whose body (to the next end match) is **longest** —
   this skips the table-of-contents entry.
 * Claude calls go through `call_claude` only: `client.messages.create(model=..., max_tokens=...,
@@ -429,16 +468,19 @@ generate_commentary(company: CompanyData, peer_median: pd.Series, sector_type: s
   text follows the delimiter line `===== 10-K SECTION TEXT BEGINS =====`.
 * `normalize_items`: run on up to `MAX_CHUNKS` chunks of the section (log when truncating);
   validate every item (`description` str, `amount_usd_m` number or None, `fiscal_year` int or None,
-  `direction` in `{"add_back", "deduct"}`, `source_quote` str); add `quote_word_count`;
-  merge chunks; de-duplicate on the first 60 lowercase characters of `description`.
-* `verify_quote`: normalise both sides (lowercase, unify curly quotes/dashes, collapse whitespace,
-  strip surrounding punctuation) and test substring containment.
+  `direction` in `{"add_back", "deduct"}`, `source_quote` str); add `quote_word_count` (quotes of
+  15+ words are kept but counted into `CommentaryResult.errors`); merge chunks; de-duplicate on
+  (first 60 lowercase characters of `description`, `fiscal_year`).
+* `verify_quote`: normalise both sides (lowercase, unify curly quotes/dashes, drop soft hyphens,
+  remove **all** whitespace — inline XBRL puts every tagged number on its own line — strip
+  surrounding punctuation) and test substring containment.
 * `premium_discount`: build a small text table of the company's multiples vs. the peer median;
   return dict with keys `growth_outlook, margin_trajectory, key_risks (list), premium_or_discount
   (premium|discount|inline|unknown), rationale`; missing fields → `"unknown"` / `[]`.
 * `generate_commentary` never raises: it collects failures into `CommentaryResult.errors`.
   Normalization runs on Item 7 (fallback: first `MAX_CHARS` of the whole filing); premium/discount runs on
-  Item 7 followed by Item 1A, truncated to `MAX_CHARS`. Offline mode reads `filing_{TICKER}.html` from
+  Item 7 followed by Item 1A within `MAX_CHARS` — when they do not fit, MD&A keeps at most 70% of the
+  budget so Risk Factors is never dropped, and the truncation is recorded in `errors`. Offline mode reads `filing_{TICKER}.html` from
   the fixture dir instead of downloading.
 
 ## 8. `compsai/pipeline.py`
@@ -462,7 +504,10 @@ run_pipeline(tickers: list[str], peer_set_name: str = "custom", target: str | No
 * A single company failing (network, missing data) is logged, added to `warnings`, and skipped;
   if no company succeeds, raise `RuntimeError`.
 * Commentary runs only when `with_commentary` and `ANTHROPIC_API_KEY` is set (otherwise a warning);
-  in offline mode, commentary comes from `commentary_{TICKER}.json` fixtures when present.
+  in offline mode, commentary comes from `commentary_{TICKER}.json` fixtures when present. Companies
+  the stage could not cover get an error-only `CommentaryResult` naming the reason, so the
+  Commentary sheet states it. A "no debt tag found; treated as debt-free" caveat from edgar.py is
+  appended to the company's `note`.
 * CLI: `python -m compsai.pipeline --peer-set us_large_software --target MSFT
   [--tickers A,B,C] [--sector-type bank] [--no-ai] [--offline] [--out DIR]`.
 

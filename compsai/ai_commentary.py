@@ -98,29 +98,65 @@ class FilingRef:
 # Step 1: find and download the annual report
 # ------------------------------------------------------------------------------------------
 
-def get_latest_annual_filing(submissions: dict, cik: str) -> FilingRef:
-    """Pick the newest 10-K (else 20-F, else 40-F) from an EDGAR submissions JSON.
-
-    `submissions["filings"]["recent"]` holds parallel arrays sorted newest first, so the
-    first index whose form matches is the latest filing of that form.
-    """
-    recent = submissions.get("filings", {}).get("recent", {})
-    forms = recent.get("form", [])
+def _scan_filing_arrays(arrays: dict, cik: str) -> FilingRef | None:
+    """First annual report in one block of EDGAR's parallel filing arrays (newest first)."""
+    forms = arrays.get("form", [])
     for wanted in ANNUAL_FORMS:
         for i, form in enumerate(forms):
             if form != wanted:  # exact match: "10-K/A" must not count as "10-K"
                 continue
-            accession = recent["accessionNumber"][i].replace("-", "")
-            document = recent["primaryDocument"][i]
+            accession = arrays["accessionNumber"][i].replace("-", "")
+            document = arrays["primaryDocument"][i]
             return FilingRef(
                 form=form,
                 accession=accession,
                 primary_document=document,
-                filing_date=recent.get("filingDate", [""] * len(forms))[i],
-                report_date=recent.get("reportDate", [""] * len(forms))[i],
+                filing_date=arrays.get("filingDate", [""] * len(forms))[i],
+                report_date=arrays.get("reportDate", [""] * len(forms))[i],
                 # EDGAR archive paths use the un-padded integer CIK.
                 url=EDGAR_ARCHIVE_URL.format(cik=int(cik), accession=accession, document=document),
             )
+    return None
+
+
+def _load_submissions_page(name: str) -> dict:
+    """Fetch one paged submissions file (https://data.sec.gov/submissions/{name}), cached like the index."""
+    from compsai.edgar import TTL_SUBMISSIONS, _fetch_cached
+
+    return _fetch_cached(name, f"https://data.sec.gov/submissions/{name}", TTL_SUBMISSIONS, refresh=False)
+
+
+def get_latest_annual_filing(submissions: dict, cik: str, page_loader=None) -> FilingRef:
+    """Pick the newest 10-K (else 20-F, else 40-F) from an EDGAR submissions JSON.
+
+    `submissions["filings"]["recent"]` holds parallel arrays sorted newest first, so the
+    first index whose form matches is the latest filing of that form. `recent` only covers
+    the last ~1,000 filings; heavy filers (banks issue thousands of prospectus supplements a
+    year) overflow it, and older filings live in the paged files listed under
+    `filings.files` (same arrays, newest first), which are fetched on demand.
+    """
+    recent = submissions.get("filings", {}).get("recent", {})
+    ref = _scan_filing_arrays(recent, cik)
+    if ref is not None:
+        return ref
+
+    pages = submissions.get("filings", {}).get("files", []) or []
+    if pages and (page_loader is not None or not is_offline()):
+        loader = page_loader or _load_submissions_page
+        for page in pages:
+            name = page.get("name")
+            if not name:
+                continue
+            try:
+                data = loader(name)
+            except Exception as exc:  # noqa: BLE001 - keep looking in the next page
+                log.warning("could not load submissions page %s: %s", name, exc)
+                continue
+            # Paged files carry the arrays at the top level; tolerate the index shape too.
+            arrays = data.get("filings", {}).get("recent", data) if isinstance(data, dict) else {}
+            ref = _scan_filing_arrays(arrays, cik)
+            if ref is not None:
+                return ref
     raise CommentaryError(f"no 10-K, 20-F or 40-F found in submissions for CIK {cik}")
 
 
@@ -146,7 +182,10 @@ def download_filing_text(ref: FilingRef, refresh: bool = False) -> str:
     if resp.status_code != 200:
         raise CommentaryError(f"SEC request failed: HTTP {resp.status_code} for {ref.url}")
 
-    text = html_to_text(resp.text)
+    # Pass the raw bytes: EDGAR serves .htm without a charset header, and requests' latin-1
+    # default would turn every curly apostrophe ("Management’s") into mojibake, breaking the
+    # Item 7 heading match and quote verification. BeautifulSoup reads the declared encoding.
+    text = html_to_text(resp.content)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return text
@@ -156,8 +195,11 @@ def download_filing_text(ref: FilingRef, refresh: bool = False) -> str:
 # Step 2: HTML -> text -> Item 7 / Item 1A
 # ------------------------------------------------------------------------------------------
 
-def html_to_text(html: str) -> str:
-    """Plain text of a 10-K: no scripts/styles, no hidden inline-XBRL header, tidy whitespace."""
+def html_to_text(html: str | bytes) -> str:
+    """Plain text of a 10-K: no scripts/styles, no hidden inline-XBRL header, tidy whitespace.
+
+    Accepts bytes (preferred for downloads: the document's own charset declaration is honoured).
+    """
     soup = BeautifulSoup(html, "html.parser")
     # ix:header carries hidden XBRL facts (dei:*) that are not visible in the filing.
     for tag in soup.find_all(["script", "style", "ix:header"]):
@@ -176,16 +218,29 @@ def html_to_text(html: str) -> str:
 # "Item 7.", "ITEM 7 -", "Item 7:", "Item 7 —" and line breaks between the number and the
 # title (BeautifulSoup emits one line per inline <span>). `[’'`]?` tolerates the curly
 # apostrophe in "Management’s".
-_SECTION_PATTERNS: dict[str, dict[str, str]] = {
+# End headings are tried in order: first the titled forms ("Item 7A. Quantitative ..."),
+# which a hyperlinked cross-reference ("see Item 7A" on its own line) cannot match, then
+# the bare forms as a last resort for filings that omit the title.
+_SEP = r"[\s.:\-–—]*"
+_SECTION_PATTERNS: dict[str, dict] = {
     "1A": {
-        "start": r"(?im)^[ \t]*item[\s.:\-–—]*1a[\s.:\-–—]*risk[\s]+factors",
-        "end": r"(?im)^[ \t]*item[\s.:\-–—]*1b\b",
-        "fallback_end": r"(?im)^[ \t]*item[\s.:\-–—]*2\b",
+        "start": rf"(?im)^[ \t]*item{_SEP}1a{_SEP}risk[\s]+factors",
+        "ends": [
+            rf"(?im)^[ \t]*item{_SEP}1b{_SEP}unresolved",
+            rf"(?im)^[ \t]*item{_SEP}2{_SEP}properties",
+            rf"(?im)^[ \t]*item{_SEP}1b\b",
+            rf"(?im)^[ \t]*item{_SEP}2\b",
+        ],
     },
     "7": {
-        "start": r"(?im)^[ \t]*item[\s.:\-–—]*7[\s.:\-–—]*management[’'`]?s[\s]+discussion",
-        "end": r"(?im)^[ \t]*item[\s.:\-–—]*7a\b",
-        "fallback_end": r"(?im)^[ \t]*item[\s.:\-–—]*8\b",
+        # "Item 7 and 7A." combined headings are accepted too.
+        "start": rf"(?im)^[ \t]*item{_SEP}7(?:{_SEP}and{_SEP}(?:item)?{_SEP}7a)?{_SEP}management[’'`]?s[\s]+discussion",
+        "ends": [
+            rf"(?im)^[ \t]*item{_SEP}7a{_SEP}quantitative",
+            rf"(?im)^[ \t]*item{_SEP}8{_SEP}financial[\s]+statements",
+            rf"(?im)^[ \t]*item{_SEP}7a\b",
+            rf"(?im)^[ \t]*item{_SEP}8\b",
+        ],
     },
 }
 
@@ -204,9 +259,8 @@ def extract_section(text: str, item: str) -> str:
 
     best = ""
     for start in re.finditer(patterns["start"], text):
-        end_match = re.search(patterns["end"], text[start.end():])
-        if end_match is None:
-            end_match = re.search(patterns["fallback_end"], text[start.end():])
+        rest = text[start.end():]
+        end_match = next((m for m in (re.search(p, rest) for p in patterns["ends"]) if m), None)
         end = start.end() + end_match.start() if end_match else len(text)
         body = text[start.start():end].strip()
         if len(body) > len(best):
@@ -301,10 +355,14 @@ def parse_json_response(text: str) -> dict | None:
         log.warning("parse_json_response: no JSON object in response: %.120r", text)
         return None
     try:
-        data = json.loads(cleaned[start:end + 1])
-    except (ValueError, TypeError) as exc:
-        log.warning("parse_json_response: invalid JSON (%s): %.120r", exc, text)
-        return None
+        # Decode the first complete object; anything after it (a stray note) is ignored.
+        data, _ = json.JSONDecoder().raw_decode(cleaned, start)
+    except ValueError:
+        try:
+            data = json.loads(cleaned[start:end + 1])
+        except (ValueError, TypeError) as exc:
+            log.warning("parse_json_response: invalid JSON (%s): %.120r", exc, text)
+            return None
     if not isinstance(data, dict):
         log.warning("parse_json_response: expected a JSON object, got %s", type(data).__name__)
         return None
@@ -346,6 +404,8 @@ def _clean_item(raw) -> dict | None:
     if not description or not quote or direction not in VALID_DIRECTIONS:
         log.warning("dropping malformed normalization item: %r", raw)
         return None
+    if len(quote.split()) >= MAX_QUOTE_WORDS:
+        log.warning("source_quote has %d words (limit: under %d): %.80r", len(quote.split()), MAX_QUOTE_WORDS, quote)
     return {
         "description": description,
         "amount_usd_m": _to_number(raw.get("amount_usd_m")),
@@ -371,7 +431,7 @@ def normalize_items(section_text: str, ticker: str, fiscal_year: int | None, cli
 
     template = load_prompt("normalize")
     items: list[dict] = []
-    seen: set[str] = set()
+    seen: set[tuple] = set()
     for chunk in chunks:
         prompt = template.substitute(
             ticker=ticker,
@@ -388,7 +448,8 @@ def normalize_items(section_text: str, ticker: str, fiscal_year: int | None, cli
             item = _clean_item(raw)
             if item is None:
                 continue
-            key = item["description"][:60].lower()  # de-duplicate across chunks
+            # De-duplicate across chunks; the same charge in two fiscal years is two items.
+            key = (item["description"][:60].lower(), item["fiscal_year"])
             if key in seen:
                 continue
             seen.add(key)
@@ -404,17 +465,19 @@ def normalize_items(section_text: str, ticker: str, fiscal_year: int | None, cli
 _QUOTE_TRANSLATION = str.maketrans({
     "‘": "'", "’": "'", "‚": "'", "‛": "'",  # curly single quotes
     "“": '"', "”": '"', "„": '"',  # curly double quotes
-    "–": "-", "—": "-", "−": "-", "‐": "-",  # dashes / minus
+    "–": "-", "—": "-", "−": "-", "‐": "-", "‑": "-", "‒": "-",  # dashes / minus / nb-hyphen
     "\xa0": " ",
+    "\xad": None,  # soft hyphen: invisible, drop it
 })
 _SURROUNDING_PUNCTUATION = " \t\n.,;:!?\"'()[]-"
 
 
 def _normalise_for_match(text: str) -> str:
     text = text.lower().translate(_QUOTE_TRANSLATION)
-    text = re.sub(r"\s+", " ", text)
-    # Inline XBRL splits "$410" into "$" and "410" on separate lines; close that gap.
-    text = re.sub(r"\$ (?=\d)", "$", text)
+    # Inline XBRL puts every tagged number on its own line ("$\n410\n) million", "8\n%"),
+    # so compare with ALL whitespace removed: a verbatim quote still matches, and a
+    # paraphrase still does not.
+    text = re.sub(r"\s+", "", text)
     return text.strip(_SURROUNDING_PUNCTUATION)
 
 
@@ -554,6 +617,24 @@ def _load_filing(company: CompanyData, result: CommentaryResult, refresh: bool, 
     return download_filing_text(ref, refresh=refresh)
 
 
+def _premium_discount_text(mdna: str, risks: str, full_text: str, result: CommentaryResult) -> str:
+    """MD&A followed by Risk Factors, within MAX_CHARS; Risk Factors keeps at least 30% of the budget."""
+    if not mdna and not risks:
+        return full_text[:MAX_CHARS]
+    if len(mdna) + len(risks) + 2 <= MAX_CHARS:
+        return "\n\n".join(part for part in (mdna, risks) if part)
+    if not risks:
+        result.errors.append(f"premium/discount input: MD&A truncated to {MAX_CHARS:,} characters")
+        return mdna[:MAX_CHARS]
+    mdna_budget = min(len(mdna), max(int(MAX_CHARS * 0.7), MAX_CHARS - len(risks) - 2))
+    risk_budget = MAX_CHARS - mdna_budget - 2
+    result.errors.append(
+        f"premium/discount input truncated to {MAX_CHARS:,} characters "
+        f"(MD&A {len(mdna):,} -> {mdna_budget:,}; Risk Factors {len(risks):,} -> {min(len(risks), risk_budget):,})"
+    )
+    return mdna[:mdna_budget] + "\n\n" + risks[:risk_budget]
+
+
 def generate_commentary(company: CompanyData, peer_median: pd.Series, sector_type: str,
                         client=None, refresh: bool = False, offline: bool = False) -> CommentaryResult:
     """Produce the CommentaryResult for one company.  Never raises: problems go to .errors."""
@@ -579,8 +660,7 @@ def generate_commentary(company: CompanyData, peer_median: pd.Series, sector_typ
         norm_text = text[:MAX_CHARS]
     else:
         norm_text = mdna
-    pd_text = "\n\n".join(part for part in (mdna, risks) if part) or text
-    pd_text = pd_text[:MAX_CHARS]
+    pd_text = _premium_discount_text(mdna, risks, text, result)
 
     # 3. Client.  Without a key there is nothing to call - say so and stop.
     if client is None:
@@ -605,6 +685,10 @@ def generate_commentary(company: CompanyData, peer_median: pd.Series, sector_typ
         for item in items:
             item["verified"] = item["verified"] or verify_quote(item["source_quote"], text)
         result.normalization_items = items
+        too_long = sum(1 for item in items if item["quote_word_count"] >= MAX_QUOTE_WORDS)
+        if too_long:
+            result.errors.append(f"{too_long} source quote(s) are {MAX_QUOTE_WORDS} words or longer "
+                                 f"(the brief asks for under {MAX_QUOTE_WORDS}); check them by hand")
     except CommentaryError as exc:
         result.errors.append(f"normalization failed: {exc}")
     except Exception as exc:  # noqa: BLE001

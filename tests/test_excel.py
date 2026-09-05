@@ -66,7 +66,8 @@ def _row(fy: int, ptype: str, end: str, revenue, ebit, da, ni, eps, debt, cash,
         "ebit": ebit, "da": da, "ebitda": ebitda, "net_income": ni, "eps_diluted": eps,
         "total_debt": debt, "cash": cash, "minority_interest": minority, "preferred": preferred,
         "diluted_shares": shares, "total_equity": equity, "goodwill": goodwill,
-        "intangibles": intang, "tangible_book_value": equity - goodwill - intang,
+        # tangible COMMON equity: preferred stock is not common shareholders' capital
+        "intangibles": intang, "tangible_book_value": equity - preferred - goodwill - intang,
         "currency": "USD",
     }
 
@@ -343,13 +344,20 @@ def test_comps_formulas_match_design(industrial_wb):
     r = rows["ALPHA"]  # second block: b = 3 + 9*1 = 12, t = 19, y = 18
     b, t, y = inputs_block_start(1), inputs_block_start(1) + 7, inputs_block_start(1) + 6
     assert (b, t, y) == (12, 19, 18)
-    assert ws.cell(row=r, column=cols["Price"]).value == f"=Inputs!$B${b + 1}"
-    assert ws.cell(row=r, column=cols["Market Cap"]).value == f"=Inputs!$B${b + 1}*Inputs!$D${b + 1}"
-    ev = ws.cell(row=r, column=cols["Enterprise Value"]).value
-    assert ev == f"=Inputs!$B${b + 1}*Inputs!$D${b + 1}+Inputs!$J${t}+Inputs!$L${t}+Inputs!$M${t}-Inputs!$K${t}"
+    # Every root input is ISNUMBER-guarded so a blank Inputs cell shows n/a rather than 0.
+    price_cell, shares_cell = f"Inputs!$B${b + 1}", f"Inputs!$D${b + 1}"
+    price_expr = f'IF(ISNUMBER({price_cell}),{price_cell},"n/a")'
+    mcap_expr = f'IF(AND(ISNUMBER({price_cell}),ISNUMBER({shares_cell})),{price_cell}*{shares_cell},"n/a")'
+    ev_expr = (f'IF(AND(ISNUMBER({price_cell}),ISNUMBER({shares_cell}),ISNUMBER(Inputs!$J${t}),ISNUMBER(Inputs!$K${t})),'
+               f'{price_cell}*{shares_cell}+Inputs!$J${t}+Inputs!$L${t}+Inputs!$M${t}-Inputs!$K${t},"n/a")')
+    assert ws.cell(row=r, column=cols["Price"]).value == f"={price_expr}"
+    assert ws.cell(row=r, column=cols["Market Cap"]).value == f"={mcap_expr}"
+    assert ws.cell(row=r, column=cols["Enterprise Value"]).value == f"={ev_expr}"
     ev_ebitda = ws.cell(row=r, column=cols["EV / EBITDA (TTM)"]).value
-    assert ev_ebitda.startswith("=IFERROR((") and ev_ebitda.endswith(f')/Inputs!$G${t},"n/a")')
-    assert ws.cell(row=r, column=cols["P / E (TTM)"]).value == f'=IFERROR(Inputs!$B${b + 1}/Inputs!$I${t},"n/a")'
+    assert ev_ebitda == f'=IFERROR(({ev_expr})/Inputs!$G${t},"n/a")'
+    # P/E = price / diluted EPS, falling back to market cap / net income like valuation.py
+    assert ws.cell(row=r, column=cols["P / E (TTM)"]).value == \
+        f'=IFERROR(IF(ISNUMBER(Inputs!$I${t}),({price_expr})/Inputs!$I${t},({mcap_expr})/Inputs!$H${t}),"n/a")'
     assert ws.cell(row=r, column=cols["EBITDA Margin"]).value == f'=IFERROR(Inputs!$G${t}/Inputs!$D${t},"n/a")'
     assert ws.cell(row=r, column=cols["Net Margin"]).value == f'=IFERROR(Inputs!$H${t}/Inputs!$D${t},"n/a")'
     assert ws.cell(row=r, column=cols["Revenue Growth (1Y)"]).value == f'=IFERROR(Inputs!$D${y}/Inputs!$D${b + 5}-1,"n/a")'
@@ -429,7 +437,7 @@ def test_inputs_block_layout(industrial_wb):
     # EBITDA and TBV are formulas (black); the rest are blue hardcodes
     r = b + 7
     assert ws.cell(row=r, column=7).value == f'=IF(AND(ISNUMBER(E{r}),ISNUMBER(F{r})),E{r}+F{r},"")'
-    assert ws.cell(row=r, column=18).value == f'=IF(ISNUMBER(O{r}),O{r}-P{r}-Q{r},"")'
+    assert ws.cell(row=r, column=18).value == f'=IF(ISNUMBER(O{r}),O{r}-M{r}-P{r}-Q{r},"")'  # TBV = tangible common equity
     assert ws.cell(row=b + 7, column=7).font.color.rgb.endswith("000000")
     for col in (4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17):
         cell = ws.cell(row=b + 7, column=col)
@@ -487,8 +495,8 @@ def test_bank_columns_and_formulas(bank_wb):
     rows = _company_rows(ws)
     r = rows["BNK1"]
     b, t = inputs_block_start(0), inputs_block_start(0) + 7
-    assert ws.cell(row=r, column=cols["P / TBV"]).value == \
-        f'=IFERROR((Inputs!$B${b + 1}*Inputs!$D${b + 1})/Inputs!$R${t},"n/a")'
+    mcap_expr = f'IF(AND(ISNUMBER(Inputs!$B${b + 1}),ISNUMBER(Inputs!$D${b + 1})),Inputs!$B${b + 1}*Inputs!$D${b + 1},"n/a")'
+    assert ws.cell(row=r, column=cols["P / TBV"]).value == f'=IFERROR(({mcap_expr})/Inputs!$R${t},"n/a")'
     ptbv = openpyxl.utils.get_column_letter(cols["P / TBV"])
     assert ws.cell(row=r, column=cols["P / TBV (stat-eligible)"]).value == \
         f'=IF(AND(ISNUMBER({ptbv}{r}),{ptbv}{r}>0,{ptbv}{r}<=20),{ptbv}{r},"")'
@@ -501,7 +509,8 @@ def test_football_field_structure(industrial_wb):
     ws = industrial_wb[SHEET_FOOTBALL]
     comps = industrial_wb[SHEET_COMPS]
     assert ws["A1"].value == "Football Field — TGT (Target Co.)"
-    assert ws["A2"].value == "Current price" and ws["B2"].value == "=Inputs!$B$4"  # target block b=3
+    assert ws["A2"].value == "Current price"
+    assert ws["B2"].value == '=IF(ISNUMBER(Inputs!$B$4),Inputs!$B$4,"n/a")'  # target block b=3
     headers = [ws.cell(row=excel.FF_HEADER_ROW, column=c).value for c in range(1, 12)]
     assert headers == [
         "Method", "Target metric", "Metric value", "Low multiple (25th)", "High multiple (75th)",
@@ -514,7 +523,7 @@ def test_football_field_structure(industrial_wb):
     ccols = _header_cols(comps)
     g = openpyxl.utils.get_column_letter(ccols["EV / EBITDA (TTM)"])
     r = excel.FF_FIRST_ROW + 1  # EV/EBITDA row
-    assert ws.cell(row=r, column=3).value == "=Inputs!$G$10"  # TTM EBITDA of block 0 (t = 3+7)
+    assert ws.cell(row=r, column=3).value == '=IF(ISNUMBER(Inputs!$G$10),Inputs!$G$10,"n/a")'  # TTM EBITDA, block 0 (t = 3+7)
     assert ws.cell(row=r, column=4).value == f"='Comps'!${g}${stats['25th Percentile']}"
     assert ws.cell(row=r, column=5).value == f"='Comps'!${g}${stats['75th Percentile']}"
     assert ws.cell(row=r, column=6).value == f'=IFERROR(D{r}*C{r},"n/a")'
@@ -522,8 +531,13 @@ def test_football_field_structure(industrial_wb):
     assert ws.cell(row=r, column=10).value == f'=IFERROR(H{r}/Inputs!$D$4,"n/a")'
     # P/E row: price = multiple x EPS
     r_pe = excel.FF_FIRST_ROW + 2
-    assert ws.cell(row=r_pe, column=3).value == "=Inputs!$I$10"
-    assert ws.cell(row=r_pe, column=10).value == f'=IFERROR(D{r_pe}*C{r_pe},"n/a")'
+    assert ws.cell(row=r_pe, column=3).value == '=IF(ISNUMBER(Inputs!$I$10),Inputs!$I$10,IF(ISNUMBER(Inputs!$H$10),Inputs!$H$10,"n/a"))'
+    assert ws.cell(row=r_pe, column=10).value == \
+        f'=IFERROR(IF(ISNUMBER(Inputs!$I$10),D{r_pe}*C{r_pe},D{r_pe}*C{r_pe}/Inputs!$D$4),"n/a")'
+    # chart helpers: base = low floored at 0, span = high - low (both floored), so a negative
+    # implied price cannot draw a bar from the axis origin
+    assert ws.cell(row=r, column=excel.FF_BASE_COL).value == f"=IFERROR(MAX(J{r},0),0)"
+    assert ws.cell(row=r, column=excel.FF_RANGE_COL).value == f"=IFERROR(MAX(K{r},0)-MAX(J{r},0),0)"
     # chart: horizontal stacked bar, invisible low series + (high - low) series
     assert len(ws._charts) == 1
     chart = ws._charts[0]
@@ -611,7 +625,8 @@ def test_missing_price_company_excluded_from_stats(tmp_path):
         assert ws.cell(row=r, column=cols[header]).value == '=""'
     assert "excluded from peer stats" in ws.cell(row=r, column=cols["Notes"]).value
     # the visible cells stay contract formulas into Inputs; only the helper is blanked
-    assert ws.cell(row=r, column=cols["Price"]).value == f"=Inputs!$B${inputs_block_start(2) + 1}"
+    price_cell = f"Inputs!$B${inputs_block_start(2) + 1}"
+    assert ws.cell(row=r, column=cols["Price"]).value == f'=IF(ISNUMBER({price_cell}),{price_cell},"n/a")'
     assert wb[SHEET_INPUTS].cell(row=inputs_block_start(2) + 1, column=2).value is None
     # ALPHA (priced) keeps a live helper formula
     ra = _company_rows(ws)["ALPHA"]
@@ -771,3 +786,69 @@ def test_recalc_bank_workbook(bank_path):
         assert abs(ws.cell(row=r, column=cols["P / E (TTM)"]).value - banks[ticker].multiples["pe_ttm"]) < 1e-6
     ptbv = [float(c.multiples["p_tbv"]) for c in banks.values()]
     assert abs(ws.cell(row=stats["Median"], column=cols["P / TBV"]).value - float(np.median(ptbv))) < 1e-6
+
+
+def test_recalc_blank_inputs_match_python_not_zero(tmp_path):
+    """Blank debt/cash/EPS/price cells must read as n/a in Excel exactly where valuation.py
+    gives NaN (or its net-income P/E fallback), so the two sides' peer statistics agree."""
+    from compsai.valuation import compute_multiples, implied_valuation, summary_stats
+
+    def rows(debt=400.0, cash=100.0, eps=2.0):
+        return [
+            _row(2022, "FY", "2022-12-31", 800, 150, 40, 90, eps * 0.8, debt, cash, 100, 500),
+            _row(2023, "FY", "2023-12-31", 900, 170, 45, 105, eps * 0.9, debt, cash, 100, 550),
+            _row(2024, "FY", "2024-12-31", 1000, 190, 50, 120, eps * 0.95, debt, cash, 100, 600),
+            _row(2025, "FY", "2025-12-31", 1100, 210, 55, 135, eps, debt, cash, 100, 650),
+            _row(2025, "TTM", "2026-03-31", 1120, 215, 56, 138, eps, debt, cash, 100, 660),
+        ]
+
+    def company(ticker, price, fin_rows, is_target=False):
+        fin = _financials(fin_rows)
+        market = _market(ticker, price, 100.0)
+        return CompanyData(ticker=ticker, name=ticker, financials=fin, market=market,
+                           multiples=compute_multiples(fin, market, "industrial"), is_target=is_target)
+
+    companies = [
+        company("NOEPS", 30.0, rows(eps=np.nan), is_target=True),  # target: P/E via net income
+        company("PEER", 25.0, rows()),
+        company("NODEBT", 28.0, rows(debt=np.nan)),  # EV must be n/a, not market cap - cash
+        company("NOPX", np.nan, rows()),  # no market price: Price/EV/P-E n/a, not 0
+        company("PEER2", 40.0, rows()),
+    ]
+    path = write_comps_workbook("guards", companies, sector_type="industrial", target="NOEPS",
+                                commentary=None, out_dir=tmp_path, as_of=AS_OF)
+    wb = _recalc_or_skip(path)
+    _assert_no_excel_errors(wb)
+    ws = wb[SHEET_COMPS]
+    cols, rows_by_ticker = _header_cols(ws), _company_rows(ws)
+    mult = {c.ticker: c.multiples for c in companies}
+
+    assert ws.cell(row=rows_by_ticker["NODEBT"], column=cols["Enterprise Value"]).value == "n/a"
+    assert ws.cell(row=rows_by_ticker["NODEBT"], column=cols["EV / EBITDA (TTM)"]).value == "n/a"
+    assert ws.cell(row=rows_by_ticker["NOPX"], column=cols["Price"]).value == "n/a"
+    assert ws.cell(row=rows_by_ticker["NOPX"], column=cols["Market Cap"]).value == "n/a"
+    assert ws.cell(row=rows_by_ticker["NOPX"], column=cols["P / E (TTM)"]).value == "n/a"
+    # no EPS -> market cap / net income, same as valuation.py
+    assert abs(ws.cell(row=rows_by_ticker["NOEPS"], column=cols["P / E (TTM)"]).value
+               - float(mult["NOEPS"]["pe_ttm"])) < 1e-6
+    assert float(mult["NOEPS"]["pe_ttm"]) == pytest.approx(30.0 * 100 / 138)
+
+    comps = pd.DataFrame({k: [float(m[k]) for m in mult.values()] for k in ("ev_revenue_ttm", "ev_ebitda_ttm", "pe_ttm")},
+                         index=list(mult))
+    comps["is_target"] = [c.is_target for c in companies]
+    stats = summary_stats(comps, ["ev_revenue_ttm", "ev_ebitda_ttm", "pe_ttm"])
+    stat_rows = _stat_rows(ws)
+    for label, key in (("Median", "median"), ("25th Percentile", "p25"), ("75th Percentile", "p75")):
+        for header, col in (("EV / EBITDA (TTM)", "ev_ebitda_ttm"), ("P / E (TTM)", "pe_ttm")):
+            assert abs(ws.cell(row=stat_rows[label], column=cols[header]).value - stats.loc[key, col]) < 1e-6
+
+    # Football field for a target without EPS: the P/E row switches to net income and
+    # matches implied_valuation to the cent.
+    ff = wb[SHEET_FOOTBALL]
+    target = companies[0]
+    python_ff = implied_valuation(target.financials, target.market, stats, "industrial").set_index("method")
+    r_pe = excel.FF_FIRST_ROW + 2
+    assert ff.cell(row=r_pe, column=2).value == "Net income (TTM)"
+    assert abs(ff.cell(row=r_pe, column=3).value - 138) < 1e-9
+    assert abs(ff.cell(row=r_pe, column=10).value - python_ff.loc["P / E (TTM)", "implied_price_low"]) < 1e-6
+    assert abs(ff.cell(row=r_pe, column=11).value - python_ff.loc["P / E (TTM)", "implied_price_high"]) < 1e-6

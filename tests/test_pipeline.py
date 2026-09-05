@@ -113,7 +113,11 @@ def test_e2e_football_field(e2e):
 
 def test_e2e_commentary_from_fixture(e2e):
     result, _ = e2e
-    assert set(result.commentary) == {"FIXA"}  # only FIXA ships a commentary fixture
+    # Every company gets a CommentaryResult: FIXA from its fixture, the others carry the reason
+    # the stage produced nothing (so the Commentary sheet says why instead of "not run").
+    assert set(result.commentary) == {"FIXA", "FIXB", "FIXC"}
+    assert result.commentary["FIXB"].normalization_items == []
+    assert result.commentary["FIXB"].errors == ["offline mode: no commentary fixture for this ticker"]
     res = result.commentary["FIXA"]
     assert isinstance(res, CommentaryResult)
     assert len(res.normalization_items) >= 3
@@ -319,3 +323,15 @@ def test_streamlit_app_offline_run_produces_results():
     assert not at.exception, [str(e) for e in at.exception]
     assert at.session_state["result"] is not None
     assert list(at.session_state["result"].comps.index) == ["FIXA", "FIXB", "FIXC"]
+
+
+def test_streamlit_sector_type_follows_the_chosen_peer_set():
+    """A keyed selectbox keeps its own state, so picking a bank peer set must push the bank
+    branch into session state (otherwise banks would be valued on EV/EBITDA)."""
+    apptest = pytest.importorskip("streamlit.testing.v1")
+    at = apptest.AppTest.from_file(str(PROJECT_ROOT / "app" / "streamlit_app.py"), default_timeout=120)
+    at.run()
+    at.sidebar.selectbox(key="peer_set").set_value("us_banks").run()
+    assert at.session_state["sector_type"] == "bank"
+    at.sidebar.selectbox(key="peer_set").set_value("us_large_software").run()
+    assert at.session_state["sector_type"] == "industrial"

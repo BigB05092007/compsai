@@ -359,8 +359,8 @@ def test_normalize_items_drops_malformed_and_dedupes():
     reply = json.dumps({"items": [
         {"description": "Restructuring charge", "amount_usd_m": None, "fiscal_year": None,
          "direction": "add_back", "source_quote": "restructuring charges of $185 million"},
-        {"description": "restructuring CHARGE", "amount_usd_m": 185, "fiscal_year": 2024,
-         "direction": "add_back", "source_quote": "restructuring charges"},  # duplicate description
+        {"description": "restructuring CHARGE", "amount_usd_m": 185, "fiscal_year": None,
+         "direction": "add_back", "source_quote": "restructuring charges"},  # duplicate description + year
         {"description": "Bad direction", "amount_usd_m": 1, "fiscal_year": 2024,
          "direction": "sideways", "source_quote": "x"},
         {"description": "", "amount_usd_m": 1, "fiscal_year": 2024, "direction": "deduct", "source_quote": "x"},
@@ -587,7 +587,8 @@ def test_download_filing_text_caches_by_accession(tmp_cache_dir, monkeypatch, fi
         hits.append(url)
         assert url == ref.url
         assert "CompsAI" in headers["User-Agent"]
-        return types.SimpleNamespace(status_code=200, text=filing_html)
+        # Real responses expose bytes; the code must decode them itself (EDGAR sends no charset).
+        return types.SimpleNamespace(status_code=200, content=filing_html.encode("utf-8"))
 
     monkeypatch.setattr(ac.requests, "get", fake_get)
     text = ac.download_filing_text(ref)
@@ -606,3 +607,114 @@ def test_download_filing_text_raises_on_http_error(tmp_cache_dir, monkeypatch):
                         lambda url, headers=None, timeout=None: types.SimpleNamespace(status_code=403, text=""))
     with pytest.raises(ac.CommentaryError, match="403"):
         ac.download_filing_text(ref)
+
+
+# ------------------------------------------------------------------------------------------
+# Review fixes: paging, decoding, headings, de-duplication, quote matching, JSON tails
+# ------------------------------------------------------------------------------------------
+
+def test_latest_annual_filing_pages_into_older_submission_files():
+    """Heavy filers overflow filings.recent (only 424B2s there); the 10-K sits in a paged file."""
+    recent = {"accessionNumber": ["0000000009-25-000{0:03d}".format(i) for i in range(5)],
+              "filingDate": ["2025-08-0%d" % (i + 1) for i in range(5)], "reportDate": [""] * 5,
+              "form": ["424B2"] * 5, "primaryDocument": ["p%d.htm" % i for i in range(5)],
+              "primaryDocDescription": ["PROSPECTUS"] * 5}
+    submissions = {"cik": "0000000009", "filings": {"recent": recent, "files": [
+        {"name": "CIK0000000009-submissions-001.json", "filingCount": 3},
+        {"name": "CIK0000000009-submissions-002.json", "filingCount": 3},
+    ]}}
+    pages = {
+        "CIK0000000009-submissions-001.json": {  # newer page: still only prospectuses
+            "accessionNumber": ["0000000009-25-000100"], "filingDate": ["2025-03-01"], "reportDate": [""],
+            "form": ["424B2"], "primaryDocument": ["p.htm"]},
+        "CIK0000000009-submissions-002.json": {  # older page: the 10-K
+            "accessionNumber": ["0000000009-25-000050", "0000000009-24-000900"], "filingDate": ["2025-02-20", "2024-12-01"],
+            "reportDate": ["2024-12-31", ""], "form": ["10-K", "8-K"], "primaryDocument": ["bank-20241231.htm", "x.htm"]},
+    }
+    loaded = []
+
+    def loader(name):
+        loaded.append(name)
+        return pages[name]
+
+    ref = ac.get_latest_annual_filing(submissions, "9", page_loader=loader)
+    assert loaded == list(pages)  # newest page first, stops once found
+    assert ref.form == "10-K" and ref.accession == "000000000925000050"
+    assert ref.url == "https://www.sec.gov/Archives/edgar/data/9/000000000925000050/bank-20241231.htm"
+    # Offline without an injected loader: no network paging, clear error.
+    with pytest.raises(ac.CommentaryError):
+        ac.get_latest_annual_filing(submissions, "9")
+
+
+def test_html_to_text_decodes_utf8_bytes_without_charset_header():
+    html = "<html><body><p>Item 7. Management’s Discussion — “one-time” charge of $410 million</p></body></html>"
+    text = ac.html_to_text(html.encode("utf-8"))
+    assert "Management’s Discussion — “one-time” charge" in text
+    # what requests' latin-1 default would have produced must NOT appear
+    assert "â€™" not in text and "Ã¢" not in text
+
+
+def test_extract_item7_survives_hyperlinked_cross_reference_to_item_7a():
+    html = """<html><body>
+    <p>Item 7. Management&#8217;s Discussion and Analysis</p><p>Item 7A. Quantitative and Qualitative Disclosures</p>
+    <p id="i7"><b>Item 7. Management&#8217;s Discussion and Analysis of Financial Condition</b></p>
+    <p>Body text about results.</p>
+    <p>Refer to <a href="#i7a">Item 7A</a> of this Form 10-K for interest-rate exposure.</p>
+    <p>We recorded a one-time charge of $410 million in fiscal 2024.</p>
+    <p id="i7a"><b>Item 7A. Quantitative and Qualitative Disclosures About Market Risk</b></p>
+    <p>Interest Rate Risk paragraph.</p>
+    <p><b>Item 8. Financial Statements and Supplementary Data</b></p>
+    </body></html>"""
+    section = ac.extract_section(ac.html_to_text(html), "7")
+    assert "one-time charge of $410 million" in section  # not cut at the cross-reference line
+    assert "Interest Rate Risk" not in section
+
+
+def test_extract_item7_accepts_combined_item_7_and_7a_heading():
+    text = ("Item 7 and 7A. Management's Discussion and Analysis and Quantitative and Qualitative "
+            "Disclosures\nbody of the combined section\nItem 8. Financial Statements\nstatements")
+    assert ac.extract_section(text, "7").endswith("body of the combined section")
+
+
+def test_normalize_items_keeps_same_item_in_two_fiscal_years():
+    reply = json.dumps({"items": [
+        {"description": "Restructuring charge", "amount_usd_m": 185, "fiscal_year": 2024,
+         "direction": "add_back", "source_quote": "Restructuring charges of $185 million in fiscal 2024"},
+        {"description": "Restructuring charge", "amount_usd_m": 120, "fiscal_year": 2023,
+         "direction": "add_back", "source_quote": "restructuring charges of $120 million in fiscal 2023"},
+        {"description": "Restructuring charge", "amount_usd_m": 185, "fiscal_year": 2024,
+         "direction": "add_back", "source_quote": "Restructuring charges of $185 million"},  # true duplicate
+    ]})
+    items = ac.normalize_items("Restructuring charges of $185 million in fiscal 2024 and restructuring "
+                               "charges of $120 million in fiscal 2023.", "T", 2024,
+                               client=FakeClient(replies=[reply]))
+    assert [(i["fiscal_year"], i["amount_usd_m"]) for i in items] == [(2024, 185.0), (2023, 120.0)]
+
+
+def test_verify_quote_ignores_inline_xbrl_line_breaks_and_odd_hyphens():
+    source = ac.html_to_text("<p>Greater China net sales decreased <ix:nonFraction>8</ix:nonFraction>% "
+                             "to $<ix:nonFraction>1.2</ix:nonFraction> billion, and a loss of "
+                             "$(<ix:nonFraction>410</ix:nonFraction>) million; a non\u2011recurring charge "
+                             "and a non\xadrecurring gain.</p>")
+    assert ac.verify_quote("net sales decreased 8%", source)
+    assert ac.verify_quote("loss of $(410) million", source)
+    assert ac.verify_quote("a non-recurring charge", source)
+    assert ac.verify_quote("nonrecurring gain", source)
+    assert not ac.verify_quote("net sales increased 8%", source)
+
+
+def test_parse_json_response_ignores_trailing_prose_with_braces():
+    data = ac.parse_json_response('{"items": [{"a": 1}]}\nNote: {fiscal_year} is null where unclear.')
+    assert data == {"items": [{"a": 1}]}
+
+
+def test_long_source_quotes_are_flagged(offline_fixture_dir):
+    long_quote = " ".join(["word"] * 20)
+    reply = json.dumps({"items": [{"description": "Long", "amount_usd_m": 1, "fiscal_year": 2024,
+                                   "direction": "add_back", "source_quote": long_quote}]})
+    company = make_company()
+    res = ac.generate_commentary(company, peer_median(), "industrial",
+                                 client=FakeClient(replies=[reply, json.dumps({"premium_or_discount": "inline"})]),
+                                 offline=True)
+    assert res.normalization_items[0]["quote_word_count"] == 20
+    assert any("15 words or longer" in e for e in res.errors)

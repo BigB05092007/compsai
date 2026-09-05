@@ -12,7 +12,7 @@ premium/discount rationale versus the peer median — with every claim tied to a
 verbatim quote that the code verifies against the filing. It exists so that the valuation
 logic is open, reproducible and explainable line by line in an interview.
 
-> Status: Modules 1–5 are built and tested offline (175 tests). Live EDGAR/Yahoo/Anthropic
+> Status: Modules 1–5 are built and tested offline (197 tests). Live EDGAR/Yahoo/Anthropic
 > calls are implemented but were **not** exercised from the build sandbox (no outbound
 > network); see [Limitations](#limitations). Finance conventions the brief said to confirm
 > with Brett are listed in [DECISIONS.md](DECISIONS.md).
@@ -122,8 +122,9 @@ lead multiple for industrials — but P/E is what the press and most investors q
 
 **Banks: P / E and P / TBV.** For a bank, debt (deposits, borrowings) is the raw material
 of the business rather than a financing choice, so EV and EBITDA have no meaning. Banks are
-valued on equity metrics: P/E, and price to *tangible* book value — equity minus goodwill
-and intangibles, i.e. the hard capital the bank holds. A bank earning above its cost of
+valued on equity metrics: P/E, and price to *tangible* book value — common equity minus
+goodwill and intangibles (preferred stock is taken out too, since the share price belongs to
+common holders), i.e. the hard capital the bank holds. A bank earning above its cost of
 equity trades above 1x TBV; the gap versus peers reflects return on tangible equity and
 risk.
 
@@ -158,6 +159,7 @@ multiples table and the filing's own growth, margin and risk language.
 
 ```
 compsai/
+├── CLAUDE.md                        # the original project brief (build order, acceptance criteria)
 ├── README.md, DECISIONS.md          # this file; finance-judgment questions for Brett
 ├── docs/DESIGN.md                   # interface contract: units, schemas, algorithms, Excel layout
 ├── requirements.txt, pyproject.toml, .env.example

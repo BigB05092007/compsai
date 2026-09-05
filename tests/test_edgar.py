@@ -303,8 +303,8 @@ def test_fixc_q1_ttm(fixc):
     assert ttm["total_debt"] == 450_000.0
     assert ttm["cash"] == 28_000.0
     assert ttm["preferred"] == 25_000.0
-    # TBV = 350,000 - 52,000 - 3,000 = 295,000
-    assert ttm["tangible_book_value"] == 295_000.0
+    # TBV = tangible COMMON equity = 350,000 - preferred 25,000 - goodwill 52,000 - intangibles 3,000 = 270,000
+    assert ttm["tangible_book_value"] == 270_000.0
 
 
 def test_ttm_concept_falls_back_to_fy_with_warning_when_ytd_missing():
@@ -332,8 +332,8 @@ def test_minority_preferred_goodwill_intangibles_default_to_zero(fixa, fixc):
 
 
 def test_bank_tangible_book_value(fixc, fixb):
-    # FIXC FY2024: equity 345,000 - goodwill 52,000 - intangibles 3,000 = 290,000
-    assert fy_row(fixc, 2024)["tangible_book_value"] == 290_000.0
+    # FIXC FY2024: equity 345,000 - preferred 25,000 - goodwill 52,000 - intangibles 3,000 = 265,000
+    assert fy_row(fixc, 2024)["tangible_book_value"] == 265_000.0
     # FIXB FY2025: 340,000 - 120,000 - 25,000 = 195,000
     assert fy_row(fixb, 2025)["tangible_book_value"] == 195_000.0
     assert fy_row(fixb, 2025)["minority_interest"] == 500.0
@@ -490,3 +490,141 @@ def test_cli_save_fixture_writes_raw_json(tmp_path, capsys):
 
 def test_cli_unknown_ticker_returns_nonzero(capsys):
     assert edgar.main(["NOPE", "--offline"]) == 1
+
+
+# ------------------------------------------------------------------------------------------
+# Review fixes: debt composition, share splits, young filers, anchored balance sheet, debt-free
+# ------------------------------------------------------------------------------------------
+
+def _mutated_fixa() -> dict:
+    return json.loads(json.dumps(get_company_facts("1", offline=True, ticker="FIXA")))
+
+
+def _gaap(facts: dict, tag: str, unit: str = "USD") -> list[dict]:
+    return facts["facts"]["us-gaap"][tag]["units"][unit]
+
+
+def test_total_debt_never_adds_commercial_paper_to_short_term_borrowings():
+    # CommercialPaper is one kind of ShortTermBorrowings in the taxonomy: 100 + 20, not 100 + 20 + 15.
+    value, label = edgar._total_debt({"us-gaap:LongTermDebt": 100.0, "us-gaap:ShortTermBorrowings": 20.0,
+                                      "us-gaap:CommercialPaper": 15.0}.get)
+    assert value == 120.0 and label == "us-gaap:LongTermDebt+us-gaap:ShortTermBorrowings"
+    value, _ = edgar._total_debt({"us-gaap:LongTermDebtNoncurrent": 80.0, "us-gaap:LongTermDebtCurrent": 20.0,
+                                  "us-gaap:ShortTermBorrowings": 20.0, "us-gaap:CommercialPaper": 15.0}.get)
+    assert value == 120.0
+    # Only commercial paper tagged -> it is the short-term piece.
+    value, _ = edgar._total_debt({"us-gaap:LongTermDebt": 100.0, "us-gaap:CommercialPaper": 15.0}.get)
+    assert value == 115.0
+
+
+def test_total_debt_combined_amount_tag_is_used_as_is():
+    value, label = edgar._total_debt({"us-gaap:DebtLongtermAndShorttermCombinedAmount": 500.0,
+                                      "us-gaap:LongTermDebt": 100.0, "us-gaap:CommercialPaper": 15.0}.get)
+    assert (value, label) == (500.0, "us-gaap:DebtLongtermAndShorttermCombinedAmount")
+
+
+def test_annual_forms_accept_foreign_and_transition_amendments():
+    assert {"20-F/A", "40-F/A", "10-KT", "10-KT/A"} <= edgar.ANNUAL_FORMS
+
+
+def test_eps_tags_include_basic_and_diluted_single_line():
+    tags = [t for spec in edgar.CONCEPT_TAGS["eps_diluted"] for t in edgar._spec_tags(spec)]
+    assert tags[:2] == ["us-gaap:EarningsPerShareDiluted", "us-gaap:EarningsPerShareBasicAndDiluted"]
+
+
+def test_stock_split_between_10k_and_10q_rebases_ttm_eps():
+    """A 4:1 split after the FY2024 10-K: the FY2025 10-Qs report post-split EPS and share
+    counts (including their prior-year comparatives). Rolling FY EPS forward would give
+    6.10 + (5.60/4 - 5.10/4) = 6.225 instead of ~1.65; the code must switch to
+    TTM net income / latest diluted shares and say so."""
+    facts = _mutated_fixa()
+    for f in _gaap(facts, "EarningsPerShareDiluted", "USD/shares"):
+        if f["form"] == "10-Q" and f["fy"] == 2025:
+            f["val"] = f["val"] / 4
+    for f in _gaap(facts, "WeightedAverageNumberOfDilutedSharesOutstanding", "shares"):
+        if f["form"] == "10-Q" and f["fy"] == 2025:
+            f["val"] = f["val"] * 4
+    df = extract_financials(facts)
+    ttm = ttm_row(df)
+    assert ttm["diluted_shares"] == 4 * 15_100.0  # post-split YTD weighted average
+    # TTM net income 99,000 / 60,400 mm shares = $1.639 per post-split share
+    assert ttm["eps_diluted"] == pytest.approx(99_000.0 / 60_400.0)
+    assert any("stock split" in w for w in df.attrs["warnings"])
+    assert df.attrs["tags_used"]["eps_diluted"]["2025-06-28"] == "net_income/diluted_shares"
+    # The unsplit fixture keeps the plain roll-forward (6.10 + 5.60 - 5.10 = 6.60) and no warning.
+    plain = extract_financials(get_company_facts("1", offline=True, ticker="FIXA"))
+    assert ttm_row(plain)["eps_diluted"] == pytest.approx(6.60)
+    assert not any("stock split" in w for w in plain.attrs["warnings"])
+
+
+def test_young_filer_comparative_years_get_their_own_labels():
+    """A company whose first 10-K is the FY2023 one carries FY2021-FY2023 in that filing, all
+    stamped fy=2023. The comparatives must be labelled 2021 and 2022, not 2023 three times."""
+    facts = _mutated_fixa()
+    for tag_data in facts["facts"]["us-gaap"].values():
+        for unit, fact_list in tag_data["units"].items():
+            tag_data["units"][unit] = [
+                f for f in fact_list
+                if not (f["form"] in edgar.ANNUAL_FORMS and f["filed"] < "2023-10-01")
+            ]
+    df = extract_financials(facts)
+    assert list(df[df["period_type"] == "FY"]["fiscal_year"]) == [2021, 2022, 2023, 2024]
+    assert list(df[df["period_type"] == "FY"]["period_end"]) == ["2021-09-25", "2022-09-24", "2023-09-30", "2024-09-28"]
+
+
+def test_ttm_balance_sheet_items_all_come_from_the_same_date():
+    """An annual-only LongTermDebt tag (debt footnote) must not be combined with quarter-end
+    commercial paper: at the latest balance-sheet date the quarterly lines win."""
+    facts = _mutated_fixa()
+    noncurrent = _gaap(facts, "LongTermDebtNoncurrent")
+    annual_only = [dict(f, val=f["val"] + 1_000_000_000) for f in noncurrent if f["form"] in edgar.ANNUAL_FORMS]
+    facts["facts"]["us-gaap"]["LongTermDebt"] = {"label": "Long-term debt", "description": "",
+                                                 "units": {"USD": annual_only}}
+    df = extract_financials(facts)
+    fy2024 = fy_row(df, 2024)
+    # FY rows: LongTermDebt (annual) + commercial paper at the same fiscal year end
+    assert fy2024["total_debt"] == pytest.approx((78_000 + 1_000) + 12_000 + 3_000 - 1_000 + 3_000, abs=1e-6) or \
+        df.attrs["tags_used"]["total_debt"]["2024-09-28"].startswith("us-gaap:LongTermDebt+")
+    # TTM: LongTermDebt has no quarter-end fact, so noncurrent + current + CP at 2025-06-28
+    ttm = ttm_row(df)
+    assert ttm["total_debt"] == 78_000.0 + 12_000.0 + 2_000.0
+    assert df.attrs["tags_used"]["total_debt"]["2025-06-28"] == \
+        "us-gaap:LongTermDebtNoncurrent+us-gaap:LongTermDebtCurrent+us-gaap:CommercialPaper"
+
+
+def test_ttm_commercial_paper_repaid_is_zero_not_stale_fiscal_year_value():
+    facts = _mutated_fixa()
+    cp = _gaap(facts, "CommercialPaper")
+    facts["facts"]["us-gaap"]["CommercialPaper"]["units"]["USD"] = [
+        f for f in cp if not (f["form"] == "10-Q" and f["fy"] == 2025)
+    ]
+    df = extract_financials(facts)
+    # Q3 FY2025 balance sheet: 78,000 noncurrent + 12,000 current, no paper outstanding
+    assert ttm_row(df)["total_debt"] == 90_000.0
+    assert not any(w.startswith("total_debt") for w in df.attrs["warnings"])
+
+
+def test_ttm_missing_quarter_end_cash_falls_back_to_fy_with_warning():
+    facts = _mutated_fixa()
+    cash = _gaap(facts, "CashAndCashEquivalentsAtCarryingValue")
+    facts["facts"]["us-gaap"]["CashAndCashEquivalentsAtCarryingValue"]["units"]["USD"] = [
+        f for f in cash if f["end"] != "2025-06-28"
+    ]
+    df = extract_financials(facts)
+    # The Q3 balance sheet (equity is reported there) stays the anchor; cash is missing at that
+    # date, so the latest earlier figure (Q2: 29,000) is used and the substitution is flagged.
+    assert ttm_row(df)["cash"] == 29_000.0
+    assert any(w == "cash: not reported at the 2025-06-28 balance sheet; using the latest earlier value"
+               for w in df.attrs["warnings"])
+    # everything else still comes from the Q3 balance sheet
+    assert ttm_row(df)["total_debt"] == 92_000.0
+
+
+def test_no_debt_tags_at_all_means_debt_free_with_warning():
+    facts = json.loads(json.dumps(get_company_facts("2", offline=True, ticker="FIXB")))
+    for tag in ("LongTermDebt", "LongTermDebtNoncurrent", "LongTermDebtCurrent"):
+        facts["facts"]["us-gaap"].pop(tag, None)
+    df = extract_financials(facts)
+    assert (df["total_debt"] == 0.0).all()
+    assert any(w.startswith("total_debt: no debt tag found") for w in df.attrs["warnings"])
+    assert set(df.attrs["tags_used"]["total_debt"].values()) == {"none tagged (treated as debt-free)"}

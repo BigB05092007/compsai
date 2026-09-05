@@ -12,12 +12,18 @@ Legend: **Default** = what the code does today · **Where** = file and function.
 
 ## D1. What counts as "total debt" in the EV bridge?
 
-**Default.** `LongTermDebt` (the taxonomy element *includes* the current portion) plus
-`ShortTermBorrowings` and `CommercialPaper`. If `LongTermDebt` is not tagged:
-`LongTermDebtNoncurrent` + (`DebtCurrent`, else `LongTermDebtCurrent`) + short-term
-borrowings/commercial paper — the short-term pieces are added only when the current piece
-did *not* come from `DebtCurrent`, because `DebtCurrent` already contains them. IFRS
-fallbacks: `Borrowings`, else `LongtermBorrowings` + `ShorttermBorrowings`.
+**Default.** `DebtLongtermAndShorttermCombinedAmount` when a filer tags the total; else
+`LongTermDebt` (the taxonomy element *includes* the current portion; or
+`LongTermDebtAndCapitalLeaseObligations`) plus one short-term piece; if neither is tagged:
+`LongTermDebtNoncurrent` + (`DebtCurrent`, else `LongTermDebtCurrent`) + the short-term piece —
+added only when the current piece did *not* come from `DebtCurrent`, because `DebtCurrent`
+already contains it. The short-term piece is `ShortTermBorrowings` if tagged, else
+`CommercialPaper`, never both (in the taxonomy commercial paper is one kind of short-term
+borrowing). IFRS fallbacks: `Borrowings`, else `LongtermBorrowings` + `ShorttermBorrowings`.
+A period with a balance sheet but no debt element under any of these tags is treated as
+**debt-free** (`total_debt = 0`) with a warning and a note in the comps table, so a genuinely
+unlevered company still gets an EV; debt tagged under an element the code does not read would
+be missed, which is why the note says "verify".
 **Why.** The brief's tag list (`LongTermDebt`, `LongTermDebtNoncurrent + LongTermDebtCurrent`,
 `DebtCurrent`) omits commercial paper, which is a large part of Apple's and Microsoft's debt;
 excluding it would understate EV. The rule above never double-counts.
@@ -58,7 +64,12 @@ from the most recent 10-Q, for revenue, EBIT, D&A, net income and diluted EPS. B
 items use the latest reported balance sheet. If no 10-Q follows the latest 10-K (or the
 filer only files 6-Ks), TTM = FY and a warning is recorded.
 **Caveat.** Applying the roll-forward to *EPS* ignores share-count drift between periods.
-The alternative is TTM net income ÷ latest diluted share count.
+The alternative is TTM net income ÷ latest diluted share count — which the code switches to
+automatically (with a warning) when the diluted share count moved outside 0.8–1.25× between the
+latest 10-K and 10-Q, i.e. after a stock split, where the roll-forward would be wrong by the
+split ratio (NVDA, AVGO, WMT, CMG in 2024).
+All TTM balance-sheet items are read at one balance-sheet date (the latest reported); a
+component missing there falls back to its latest earlier value with a warning.
 **Where.** `compsai/edgar.py::_ytd_period`, `_ytd_facts`, `extract_financials`.
 **Question.** Keep the EPS roll-forward (simple, common) or switch to NI ÷ diluted shares?
 
@@ -90,10 +101,12 @@ years the CAGR is NaN rather than silently becoming a 2-year CAGR.
 
 The brief said *"Ask Brett before implementing P/TBV."* It is implemented so that the
 `us_banks` peer set produces a usable sheet; it is easy to remove.
-**Default.** `P/TBV = market cap ÷ (total equity − goodwill − intangibles)`. Preferred
-equity is **not** deducted from tangible book value (so this is TBV, not tangible *common*
-equity). Bank peer sets show P/E and P/TBV; EV, EV/Revenue, EV/EBITDA and EBITDA margin are
-blank with a note because debt is a bank's raw material, not a financing choice.
+**Default.** `P/TBV = market cap ÷ (total equity − preferred − goodwill − intangibles)`, i.e.
+tangible **common** equity, because the numerator (price × common shares) belongs to common
+holders only — every name in `us_banks` carries $10–30bn of preferred, so leaving it in the
+denominator would understate the ratio by 5–10%. Bank peer sets show P/E and P/TBV; EV,
+EV/Revenue, EV/EBITDA and EBITDA margin are blank with a note because debt is a bank's raw
+material, not a financing choice.
 **Data caveats for real banks.** Cash is usually tagged `CashAndDueFromBanks` (not in the
 cash fallback list — harmless because EV is not used for banks), and several banks tag
 revenue only as `InterestAndDividendIncomeOperating` + `NoninterestIncome` or
@@ -101,7 +114,7 @@ revenue only as `InterestAndDividendIncomeOperating` + `NoninterestIncome` or
 for some of JPM/BAC/WFC/C/GS/MS until those tags are added.
 **Where.** `compsai/valuation.py::compute_multiples` (bank branch), `MULTIPLES_BY_SECTOR`;
 `compsai/edgar.py::CONCEPT_TAGS` (`total_equity`, `goodwill`, `intangibles`).
-**Questions.** Keep P/TBV? Deduct preferred (P/TCE)? Add the bank revenue/cash tags?
+**Questions.** Keep P/TBV? Relabel the column "P / TCE"? Add the bank revenue/cash tags?
 
 ## D10. The target is excluded from its own peer statistics
 
@@ -118,10 +131,13 @@ uses the 25th–75th percentile multiples (the brief's choice); some groups use 
 
 ## D12. Market cap uses basic shares outstanding
 
-**Default.** Price × shares outstanding from Yahoo Finance (`fast_info.shares`), falling
-back to the 10-K/10-Q cover-page count (`dei:EntityCommonStockSharesOutstanding`, summing
-share classes reported on the same date). Fully diluted shares via the treasury-stock method
-are **not** computed, while P/E uses *diluted* EPS. This is a documented simplification.
+**Default.** Price × shares outstanding from Yahoo Finance (`fast_info.shares`, else
+`impliedSharesOutstanding`), falling back to the 10-K/10-Q cover-page count
+(`dei:EntityCommonStockSharesOutstanding`, summing share classes reported on the same date).
+Because Yahoo's count covers only the quoted share class, a Yahoo figure below 90% of the
+cover-page total is replaced by that total (GOOGL: 5.8bn Class A vs 12.1bn all classes).
+Fully diluted shares via the treasury-stock method are **not** computed, while P/E uses
+*diluted* EPS. This is a documented simplification.
 **Where.** `compsai/market.py::get_market_data`, `_shares_from_xbrl`.
 **Question.** Accept basic shares, or add a treasury-stock-method dilution step?
 
@@ -145,7 +161,8 @@ D&A fallbacks include Microsoft's `DepreciationAmortizationAndOther` and the sum
 
 ## D15. Foreign private issuers (20-F / 40-F, IFRS) are best effort
 
-**Default.** Annual facts are accepted from 10-K, 10-K/A, 20-F and 40-F; IFRS tags are
+**Default.** Annual facts are accepted from 10-K, 10-K/A, 10-KT, 20-F, 40-F and their
+amendments; IFRS tags are
 last-resort fallbacks for each concept; 6-K filings carry no XBRL so TTM = FY. Values in a
 non-USD currency are reported as-is with the currency recorded in the table — multiples
 still work (they are ratios) but market cap uses the Yahoo price currency, so cross-currency
@@ -165,7 +182,10 @@ flagged, not dropped.
 ## D17. Excel statistics formulas are bare `MEDIAN` / `QUARTILE`
 
 **Default.** As the brief requires. If *every* peer is ineligible for a multiple, Excel
-shows `#NUM!` for that statistic (the Python side shows NaN).
+shows `#NUM!` for that statistic (the Python side shows NaN). Every root input on the Comps
+sheet (price, shares, debt, cash, EPS) is `ISNUMBER`-guarded so a blank cell shows "n/a"
+exactly where Python shows NaN — Excel would otherwise read a blank as 0 and quietly include
+a debt-free or unpriced company in the statistics.
 **Where.** `compsai/excel.py::_write_comps`.
 **Question.** Wrap them in `IFERROR(..., "n/a")`?
 
@@ -182,7 +202,16 @@ python -m compsai.edgar AAPL MSFT JPM --save-fixture tests/fixtures
 
 and adjust the hand-checked numbers in `tests/test_edgar.py`.
 
-## D19. Ownership of `valuation.py` and the Streamlit app
+## D19. Share price = last trade, not strictly "last close"
+
+**Default.** `yfinance` `fast_info.last_price` (fallback `currentPrice` / `regularMarketPrice`).
+Outside market hours this *is* the last close; during the session it is the latest trade, so
+two runs on the same day can differ slightly. The `as_of` date is recorded on the Inputs sheet.
+**Alternative.** `previous_close`, which is reproducible intraday but one day stale after the
+close.
+**Where.** `compsai/market.py::_fetch_yfinance`.
+
+## D20. Ownership of `valuation.py` and the Streamlit app
 
 The brief reserved `valuation.py` for Brett (Claude Code to review) and the Streamlit app
 for Brett alone. Both were written here because the project was requested end to end and

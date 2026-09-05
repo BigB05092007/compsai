@@ -40,6 +40,8 @@ log = logging.getLogger("compsai")
 
 #: Prices move; a half-day cache keeps a comps run consistent without going stale.
 TTL_MARKET = 12 * 3600
+#: Yahoo share count below this fraction of the XBRL cover-page total = a single share class.
+MULTI_CLASS_SHARE_RATIO = 0.9
 
 
 # ------------------------------------------------------------------------------------------
@@ -105,7 +107,9 @@ def _fetch_yfinance(ticker: str) -> dict:
             if out["price"] is None:
                 out["price"] = _as_number(info.get("currentPrice") or info.get("regularMarketPrice"))
             if raw_shares is None:
-                raw_shares = _as_number(info.get("sharesOutstanding"))
+                # impliedSharesOutstanding is Yahoo's all-class total; sharesOutstanding
+                # (and fast_info["shares"]) count only the quoted share class.
+                raw_shares = _as_number(info.get("impliedSharesOutstanding") or info.get("sharesOutstanding"))
             if not out["currency"] and info.get("currency"):
                 out["currency"] = str(info["currency"])
         except Exception as exc:
@@ -196,14 +200,24 @@ def get_market_data(ticker: str, facts: dict | None = None, refresh: bool = Fals
     if data.get("as_of"):
         result["as_of"] = str(data["as_of"])
 
-    # Shares fallback from the XBRL cover page.
-    if shares is None:
-        xbrl_shares = _shares_from_xbrl(facts)
-        if xbrl_shares is not None:
-            result["shares_outstanding"] = xbrl_shares
-            result["source"] = "yfinance+xbrl" if (price is not None and result["source"] == "yfinance") else "xbrl"
+    # Shares from the XBRL cover page: the fallback when Yahoo has none, and the tie-breaker
+    # for multi-class issuers (GOOGL/GOOG, META, BRK): Yahoo's count covers only the quoted
+    # class, while dei:EntityCommonStockSharesOutstanding lists every class, so a Yahoo
+    # figure well below the cover-page total is a class count, not the company's.
+    xbrl_shares = _shares_from_xbrl(facts)
+    from_yahoo = result["source"] == "yfinance"
+    use_xbrl = xbrl_shares is not None and (
+        shares is None or (from_yahoo and shares < MULTI_CLASS_SHARE_RATIO * xbrl_shares)
+    )
+    if use_xbrl:
+        if shares is not None:
+            log.info("%s: Yahoo shares %.1f mm look like one share class; using the cover-page "
+                     "total of %.1f mm (dei:EntityCommonStockSharesOutstanding)", ticker, shares, xbrl_shares)
+        else:
             log.info("%s: shares outstanding from dei:EntityCommonStockSharesOutstanding (%.1f mm)",
                      ticker, xbrl_shares)
+        result["shares_outstanding"] = xbrl_shares
+        result["source"] = "yfinance+xbrl" if (price is not None and from_yahoo) else "xbrl"
 
     # Caller overrides beat every source.
     for key in ("price", "shares_outstanding"):

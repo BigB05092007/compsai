@@ -255,6 +255,10 @@ def run_pipeline(
             log.warning("%s: skipped (valuation failed: %s)", ticker, exc)
             warnings.append(f"{ticker}: skipped - valuation failed: {exc}")
             continue
+        fin_warnings = entry["financials"].attrs.get("warnings", [])
+        if any(w.startswith("total_debt: no debt tag found") for w in fin_warnings):
+            # Make the debt-free assumption visible in the table, not only in the log.
+            multiples["note"] = "; ".join(part for part in (multiples["note"], "no debt tag found; treated as debt-free") if part)
         companies.append(CompanyData(
             ticker=ticker, name=entry["name"], financials=entry["financials"],
             market=entry["market"], multiples=multiples, is_target=(ticker == target),
@@ -291,7 +295,7 @@ def run_pipeline(
         _report(progress, "excel", "writing the comps workbook")
         xlsx_path = write_comps_workbook(
             peer_set_name, companies, sector_type=sector_type, target=target,
-            commentary=commentary or None, out_dir=out_dir or OUTPUT_DIR,
+            commentary=commentary if with_commentary else None, out_dir=out_dir or OUTPUT_DIR,
         )
         _report(progress, "excel", f"wrote {xlsx_path}")
     else:
@@ -316,7 +320,9 @@ def _run_commentary(companies, comps, sector_type, offline, refresh, client, war
         for company in companies:
             fixture = _load_commentary_fixture(company.ticker)
             if fixture is None:
+                reason = "offline mode: no commentary fixture for this ticker"
                 warnings.append(f"{company.ticker}: no commentary fixture offline; commentary skipped")
+                results[company.ticker] = CommentaryResult(ticker=company.ticker, errors=[reason])
                 continue
             results[company.ticker] = fixture
         return results
@@ -325,7 +331,8 @@ def _run_commentary(companies, comps, sector_type, offline, refresh, client, war
         message = "ANTHROPIC_API_KEY not set; commentary skipped"
         warnings.append(message)
         _report(progress, "commentary", message)
-        return results
+        # One error-only result per company so the Commentary sheet states the real reason.
+        return {c.ticker: CommentaryResult(ticker=c.ticker, errors=[message]) for c in companies}
 
     from compsai.ai_commentary import generate_commentary  # local import: keeps anthropic optional
 

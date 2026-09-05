@@ -422,8 +422,8 @@ def _ebitda_formula(r: int) -> str:
 
 
 def _tbv_formula(r: int) -> str:
-    """Inputs!R = total equity - goodwill - intangibles, or "" when equity is blank."""
-    return f'=IF(ISNUMBER(O{r}),O{r}-P{r}-Q{r},"")'
+    """Inputs!R = total equity - preferred - goodwill - intangibles (tangible common equity), or "" when equity is blank."""
+    return f'=IF(ISNUMBER(O{r}),O{r}-M{r}-P{r}-Q{r},"")'
 
 
 def _write_financial_row(ws: Worksheet, r: int, row: pd.Series) -> None:
@@ -454,7 +454,7 @@ def _write_ttm_as_fy_link(ws: Worksheet, r: int, fy_row: int) -> None:
         elif key == "ebitda":
             _put(ws, r, col, _ebitda_formula(r), kind=kind)  # EBITDA = EBIT + D&A
         elif key == "tangible_book_value":
-            _put(ws, r, col, _tbv_formula(r), kind=kind)  # TBV = equity - goodwill - intangibles
+            _put(ws, r, col, _tbv_formula(r), kind=kind)  # TBV = equity - preferred - goodwill - intangibles
         else:
             _put(ws, r, col, f"={letter}{fy_row}", kind=kind)
 
@@ -472,12 +472,18 @@ def _comps_formulas(b: int) -> dict[str, str]:
     """
     t, y, prior, oldest = b + 7, b + 6, b + 5, b + 3
     inp = "Inputs!$"
-    price = f"{inp}B${b + 1}"
+    price_cell, shares_cell = f"{inp}B${b + 1}", f"{inp}D${b + 1}"
+    debt_cell, cash_cell = f"{inp}J${t}", f"{inp}K${t}"
+    # Every root input is guarded with ISNUMBER so a blank cell yields "n/a" instead of the 0
+    # Excel would otherwise read - the same rule valuation.py applies (NaN in, NaN out).
+    price = f'IF(ISNUMBER({price_cell}),{price_cell},"n/a")'
     # Market cap = price x shares outstanding
-    market_cap = f"{price}*{inp}D${b + 1}"
+    market_cap = f'IF(AND(ISNUMBER({price_cell}),ISNUMBER({shares_cell})),{price_cell}*{shares_cell},"n/a")'
     # EV = market cap + total debt + minority interest + preferred - cash
-    # (Rosenbaum & Pearl / Training the Street enterprise-value bridge)
-    ev = f"{market_cap}+{inp}J${t}+{inp}L${t}+{inp}M${t}-{inp}K${t}"
+    # (Rosenbaum & Pearl / Training the Street enterprise-value bridge); minority interest and
+    # preferred default to 0 when untagged, but a missing debt or cash figure makes EV n/a.
+    ev = (f'IF(AND(ISNUMBER({price_cell}),ISNUMBER({shares_cell}),ISNUMBER({debt_cell}),ISNUMBER({cash_cell})),'
+          f'{price_cell}*{shares_cell}+{debt_cell}+{inp}L${t}+{inp}M${t}-{cash_cell},"n/a")')
     return {
         "price": f"={price}",
         "market_cap": f"={market_cap}",
@@ -486,8 +492,9 @@ def _comps_formulas(b: int) -> dict[str, str]:
         "ev_revenue_ttm": f'=IFERROR(({ev})/{inp}D${t},"n/a")',
         # EV / EBITDA (TTM)
         "ev_ebitda_ttm": f'=IFERROR(({ev})/{inp}G${t},"n/a")',
-        # P / E = price / diluted EPS (TTM)
-        "pe_ttm": f'=IFERROR({price}/{inp}I${t},"n/a")',
+        # P / E = price / diluted EPS (TTM); when no EPS is reported, market cap / net income
+        # (the same fallback valuation.py uses, so both sides stay in step)
+        "pe_ttm": f'=IFERROR(IF(ISNUMBER({inp}I${t}),({price})/{inp}I${t},({market_cap})/{inp}H${t}),"n/a")',
         # P / TBV = market cap / tangible book value
         "p_tbv": f'=IFERROR(({market_cap})/{inp}R${t},"n/a")',
         # EBITDA margin = EBITDA / revenue (TTM)
@@ -618,7 +625,8 @@ FF_HEADERS = [
 ]
 FF_HEADER_ROW = 4
 FF_FIRST_ROW = 5
-FF_RANGE_COL = len(FF_HEADERS) + 1  # helper: high - low, feeds the floating bar
+FF_RANGE_COL = len(FF_HEADERS) + 1  # helper: high - low (floored at 0), the visible bar
+FF_BASE_COL = len(FF_HEADERS) + 2  # helper: low floored at 0, the invisible bar base
 
 
 def _write_football_field(
@@ -634,18 +642,24 @@ def _write_football_field(
     inp = "Inputs!$"
     price_ref = f"{inp}B${b + 1}"
     shares_ref = f"{inp}D${b + 1}"
-    # Net-debt items of the EV bridge (debt + minority + preferred - cash) at TTM
-    bridge = f"{inp}J${t}+{inp}L${t}+{inp}M${t}-{inp}K${t}"
+    debt_ref, cash_ref = f"{inp}J${t}", f"{inp}K${t}"
+    eps_ref, ni_ref = f"{inp}I${t}", f"{inp}H${t}"
+    # Net-debt items of the EV bridge (debt + minority + preferred - cash) at TTM; "n/a" when
+    # debt or cash is blank so a missing input never silently counts as 0.
+    bridge = (f'IF(AND(ISNUMBER({debt_ref}),ISNUMBER({cash_ref})),'
+              f'{debt_ref}+{inp}L${t}+{inp}M${t}-{cash_ref},"n/a")')
 
     _put(ws, 1, 1, f"Football Field — {target.ticker} ({target.name})", bold=True)
     _put(ws, 2, 1, "Current price")
-    _put(ws, 2, 2, f"={price_ref}", kind="per_share")
+    _put(ws, 2, 2, f'=IF(ISNUMBER({price_ref}),{price_ref},"n/a")', kind="per_share")
     _put(ws, 2, 3, "Shares out (mm)")
-    _put(ws, 2, 4, f"={shares_ref}", kind="shares")
+    _put(ws, 2, 4, f'=IF(ISNUMBER({shares_ref}),{shares_ref},"n/a")', kind="shares")
 
     for col, header in enumerate(FF_HEADERS, start=1):
         _header_cell(ws, FF_HEADER_ROW, col, header)
-    _put(ws, FF_HEADER_ROW, FF_RANGE_COL, "Price range (high − low)", italic=True, color=GREY,
+    _put(ws, FF_HEADER_ROW, FF_RANGE_COL, "Bar span (high − low)", italic=True, color=GREY,
+         wrap=True, align="center")
+    _put(ws, FF_HEADER_ROW, FF_BASE_COL, "Bar base (low, floored at 0)", italic=True, color=GREY,
          wrap=True, align="center")
 
     p25_row = comps_map["stats_rows"]["p25"]
@@ -659,8 +673,14 @@ def _write_football_field(
         metric_kind = "per_share" if metric_key == "eps_diluted" else "dollars"
 
         _put(ws, r, 1, header_for(key))
-        _put(ws, r, 2, metric_label)
-        _put(ws, r, 3, f"={metric_ref}", kind=metric_kind)
+        if key == "pe_ttm":
+            # Diluted EPS when reported; otherwise net income (valuation.py makes the same switch).
+            _put(ws, r, 2, f'=IF(ISNUMBER({eps_ref}),"{metric_label}","Net income (TTM)")')
+            _put(ws, r, 3, f'=IF(ISNUMBER({eps_ref}),{eps_ref},IF(ISNUMBER({ni_ref}),{ni_ref},"n/a"))',
+                 kind=metric_kind)
+        else:
+            _put(ws, r, 2, metric_label)
+            _put(ws, r, 3, f'=IF(ISNUMBER({metric_ref}),{metric_ref},"n/a")', kind=metric_kind)
         _put(ws, r, 4, f"='{SHEET_COMPS}'!${comps_letter}${p25_row}", kind="multiple")
         _put(ws, r, 5, f"='{SHEET_COMPS}'!${comps_letter}${p75_row}", kind="multiple")
 
@@ -682,8 +702,14 @@ def _write_football_field(
                 eq_ref = f"{get_column_letter(eq_col)}{r}"
                 px_ref = f"{get_column_letter(px_col)}{r}"
                 if key == "pe_ttm":
-                    _put(ws, r, px_col, f'=IFERROR({mult_col}{r}*C{r},"n/a")', kind="per_share")
-                    _put(ws, r, eq_col, f'=IFERROR({px_ref}*{shares_ref},"n/a")', kind="dollars")
+                    # EPS path: price = multiple x EPS, equity = price x shares.
+                    # Net-income path (no EPS): equity = multiple x net income, price = equity / shares.
+                    _put(ws, r, px_col,
+                         f'=IFERROR(IF(ISNUMBER({eps_ref}),{mult_col}{r}*C{r},{mult_col}{r}*C{r}/{shares_ref}),"n/a")',
+                         kind="per_share")
+                    _put(ws, r, eq_col,
+                         f'=IFERROR(IF(ISNUMBER({eps_ref}),{px_ref}*{shares_ref},{mult_col}{r}*C{r}),"n/a")',
+                         kind="dollars")
                 else:  # p_tbv
                     _put(ws, r, eq_col, f'=IFERROR({mult_col}{r}*C{r},"n/a")', kind="dollars")
                     _put(ws, r, px_col, f'=IFERROR({eq_ref}/{shares_ref},"n/a")', kind="per_share")
@@ -694,14 +720,18 @@ def _write_football_field(
                     # Implied EV = implied equity + net debt items (EV bridge forward)
                     _put(ws, r, ev_col, f'=IFERROR({eq_ref}+{bridge},"n/a")', kind="dollars")
 
-        # Helper for the floating bar: the visible bar spans low -> high
-        _put(ws, r, FF_RANGE_COL, f"=IFERROR(K{r}-J{r},0)", kind="per_share", color=GREY)
+        # Chart helpers. A stacked bar cannot start below the axis, so the invisible base is
+        # the low price floored at 0 and the visible span runs from there to the high price;
+        # a fully negative range (net debt above implied EV) draws nothing.
+        _put(ws, r, FF_BASE_COL, f"=IFERROR(MAX(J{r},0),0)", kind="per_share", color=GREY)
+        _put(ws, r, FF_RANGE_COL, f"=IFERROR(MAX(K{r},0)-MAX(J{r},0),0)", kind="per_share", color=GREY)
 
     last_row = FF_FIRST_ROW + len(methods) - 1
     _add_football_chart(ws, target.ticker, last_row)
 
     _set_widths(ws, {"A": 22, "B": 22, "C": 14, "D": 14, "E": 14, "F": 15, "G": 15, "H": 16,
-                     "I": 16, "J": 15, "K": 15, get_column_letter(FF_RANGE_COL): 12})
+                     "I": 16, "J": 15, "K": 15, get_column_letter(FF_RANGE_COL): 12,
+                     get_column_letter(FF_BASE_COL): 12})
     ws.row_dimensions[FF_HEADER_ROW].height = 30
     ws.freeze_panes = f"A{FF_FIRST_ROW}"
 
@@ -728,7 +758,7 @@ def _add_football_chart(ws: Worksheet, ticker: str, last_row: int) -> None:
     chart.height = 7.5
     chart.width = 18
 
-    low = Reference(ws, min_col=10, min_row=FF_HEADER_ROW, max_row=last_row)  # J
+    low = Reference(ws, min_col=FF_BASE_COL, min_row=FF_HEADER_ROW, max_row=last_row)
     span = Reference(ws, min_col=FF_RANGE_COL, min_row=FF_HEADER_ROW, max_row=last_row)
     chart.add_data(low, titles_from_data=True)
     chart.add_data(span, titles_from_data=True)

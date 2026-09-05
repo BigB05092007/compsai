@@ -58,7 +58,7 @@ COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 
 #: Forms that carry a full fiscal year of XBRL data (domestic + foreign annual reports).
-ANNUAL_FORMS = {"10-K", "10-K/A", "20-F", "40-F"}
+ANNUAL_FORMS = {"10-K", "10-K/A", "10-KT", "10-KT/A", "20-F", "20-F/A", "40-F", "40-F/A"}
 #: Forms that carry quarterly XBRL data. (6-K has no XBRL, so foreign filers get TTM = FY.)
 QUARTERLY_FORMS = {"10-Q", "10-Q/A"}
 
@@ -96,7 +96,8 @@ CONCEPT_TAGS: dict[str, list] = {
                       "ifrs-full:DepreciationAndAmortisationExpense"],
     "net_income":    ["us-gaap:NetIncomeLoss", "us-gaap:ProfitLoss",
                       "ifrs-full:ProfitLossAttributableToOwnersOfParent", "ifrs-full:ProfitLoss"],
-    "eps_diluted":   ["us-gaap:EarningsPerShareDiluted", "ifrs-full:DilutedEarningsLossPerShare"],
+    "eps_diluted":   ["us-gaap:EarningsPerShareDiluted", "us-gaap:EarningsPerShareBasicAndDiluted", "ifrs-full:DilutedEarningsLossPerShare",
+                    "ifrs-full:BasicAndDilutedEarningsLossPerShare"],
     "cash":          ["us-gaap:CashAndCashEquivalentsAtCarryingValue",
                       "us-gaap:CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
                       "ifrs-full:CashAndCashEquivalents"],
@@ -126,6 +127,10 @@ UNIT_KIND = {"eps_diluted": "per_share", "diluted_shares": "shares"}
 FY_END_TOLERANCE_DAYS = 7      # 52/53-week filers: other concepts vs the revenue period end
 YTD_START_TOLERANCE_DAYS = 7   # YTD_cur must start the day after the fiscal year end
 YTD_PRIOR_TOLERANCE_DAYS = 10  # YTD_prior end / duration vs YTD_cur
+# Diluted share count ratio (latest 10-Q / latest 10-K) outside this band = a change of share
+# basis (stock split, reverse split, major issuance); buybacks move it by a few percent a year.
+SHARE_BASIS_MIN_RATIO = 0.8
+SHARE_BASIS_MAX_RATIO = 1.25
 ANNUAL_MIN_DAYS, ANNUAL_MAX_DAYS = 350, 380
 
 
@@ -417,6 +422,7 @@ def _annual_duration_facts(fact_list: list[dict]) -> dict[date, dict]:
     the LATEST filing (most recent restatement).
     """
     groups: dict[date, list[dict]] = {}
+    filing_own_end: dict[str, date] = {}  # accession -> the latest annual period in that filing
     for f in fact_list:
         if f.get("form") not in ANNUAL_FORMS or not f.get("start"):
             continue
@@ -424,13 +430,25 @@ def _annual_duration_facts(fact_list: list[dict]) -> dict[date, dict]:
         if not (ANNUAL_MIN_DAYS <= (end - start).days <= ANNUAL_MAX_DAYS):
             continue  # not a full fiscal year (quarters, 6-month stubs, etc.)
         groups.setdefault(end, []).append(f)
+        accn = f.get("accn")
+        if accn:
+            filing_own_end[accn] = max(filing_own_end.get(accn, end), end)
     out: dict[date, dict] = {}
     for end, group in groups.items():
         earliest = min(group, key=lambda f: f.get("filed", ""))
         latest = _latest_filed(group)
         fy = earliest.get("fy")
+        if fy:
+            # A filing's `fy` is the filing's OWN fiscal year. The comparative periods it
+            # carries (a young company's first 10-K shows three years, all stamped with the
+            # same fy) sit k fiscal years earlier, so label them fy - k.
+            own_end = filing_own_end.get(earliest.get("accn"), end)
+            years_back = round((own_end - end).days / 365.25)
+            label = int(fy) - years_back
+        else:
+            label = end.year
         out[end] = {
-            "fiscal_year": int(fy) if fy else end.year,
+            "fiscal_year": label,
             "value": latest["val"],
             "filed": latest.get("filed", ""),
         }
@@ -556,29 +574,41 @@ def _total_debt(lookup: Lookup) -> tuple[float | None, str | None]:
     Total debt in $mm following DESIGN.md (operating leases excluded; finance leases only
     if the company embeds them in these debt tags):
 
-        LongTermDebt (taxonomy definition INCLUDES the current portion)
-          + ShortTermBorrowings + CommercialPaper                   (each 0 if absent)
+        DebtLongtermAndShorttermCombinedAmount                       (already the total)
+        else LongTermDebt (taxonomy definition INCLUDES the current portion)
+             [or LongTermDebtAndCapitalLeaseObligations, same meaning incl. finance leases]
+          + short-term piece
         else LongTermDebtNoncurrent + (DebtCurrent or LongTermDebtCurrent)
-          + short-term items only when the current piece is NOT DebtCurrent
+          + short-term piece only when the current piece is NOT DebtCurrent
             (DebtCurrent already contains short-term borrowings -> avoid double counting)
-        else current piece alone (+ short-term items, same rule)
+        else current piece alone (+ short-term piece, same rule)
         else IFRS Borrowings, else IFRS long-term + short-term borrowings, else NaN.
+
+    Short-term piece = ShortTermBorrowings if tagged, else CommercialPaper, else 0. In the
+    us-gaap taxonomy CommercialPaper is one KIND of short-term borrowing, so the two are
+    never added together (that would count the paper twice).
     """
-    long_term_debt = lookup("us-gaap:LongTermDebt")
+    combined = lookup("us-gaap:DebtLongtermAndShorttermCombinedAmount")
+    if combined is not None:
+        return combined, "us-gaap:DebtLongtermAndShorttermCombinedAmount"
+
     noncurrent = lookup("us-gaap:LongTermDebtNoncurrent")
     debt_current = lookup("us-gaap:DebtCurrent")
     ltd_current = lookup("us-gaap:LongTermDebtCurrent")
     short_term_borrowings = lookup("us-gaap:ShortTermBorrowings")
     commercial_paper = lookup("us-gaap:CommercialPaper")
 
-    short_term_parts = [("us-gaap:ShortTermBorrowings", short_term_borrowings),
-                        ("us-gaap:CommercialPaper", commercial_paper)]
-    short_term_parts = [(t, v) for t, v in short_term_parts if v is not None]
-    short_term = sum(v for _, v in short_term_parts)
-    short_term_label = [t for t, _ in short_term_parts]
+    if short_term_borrowings is not None:
+        short_term, short_term_label = short_term_borrowings, ["us-gaap:ShortTermBorrowings"]
+    elif commercial_paper is not None:
+        short_term, short_term_label = commercial_paper, ["us-gaap:CommercialPaper"]
+    else:
+        short_term, short_term_label = 0.0, []
 
-    if long_term_debt is not None:
-        return long_term_debt + short_term, "+".join(["us-gaap:LongTermDebt"] + short_term_label)
+    for total_tag in ("us-gaap:LongTermDebt", "us-gaap:LongTermDebtAndCapitalLeaseObligations"):
+        long_term_debt = lookup(total_tag)
+        if long_term_debt is not None:
+            return long_term_debt + short_term, "+".join([total_tag] + short_term_label)
 
     # Current piece: DebtCurrent already includes short-term borrowings/CP.
     if debt_current is not None:
@@ -648,12 +678,43 @@ def _ttm_cur_lookup(facts: dict, currency: str, ytd_start: date, ytd_end: date, 
     return lookup
 
 
-def _ttm_instant_lookup(facts: dict, currency: str, e_fy: date, ytd_end: date, kind: str = "money") -> Lookup:
-    """Latest balance-sheet value (any form) dated between the FY end and the latest quarter end."""
+def _ttm_balance_sheet_date(facts: dict, currency: str, e_fy: date, ytd_end: date) -> date | None:
+    """
+    The date of the latest balance sheet filed after the fiscal year end (up to the latest
+    quarter end), taken from the core balance-sheet tags (cash, then total equity).
+
+    Every TTM balance-sheet item is then read at THIS one date, so debt, cash and minority
+    interest always come from the same balance sheet - never fiscal-year-end debt added to
+    quarter-end commercial paper.
+    """
+    candidates: list[date] = []
+    for concept in ("cash", "total_equity"):
+        for spec in CONCEPT_TAGS[concept]:
+            for tag in _spec_tags(spec):
+                groups = _instant_facts_by_end(_tag_facts(facts, tag, "money", currency))
+                candidates.extend(d for d in groups if e_fy < d <= ytd_end)
+    return max(candidates) if candidates else None
+
+
+def _ttm_instant_lookup(facts: dict, currency: str, bs_date: date, kind: str = "money") -> Lookup:
+    """Balance-sheet value (any form) at `bs_date` (exact, then +/-7 days); None if not reported there."""
     def lookup(tag: str) -> float | None:
-        raw = _latest_instant_between(_tag_facts(facts, tag, kind, currency), e_fy, ytd_end)
+        raw = _instant_value_at(_tag_facts(facts, tag, kind, currency), bs_date, FY_END_TOLERANCE_DAYS, forms=None)
         return None if raw is None else _to_millions(raw, kind)
     return lookup
+
+
+def _ttm_latest_lookup(facts: dict, currency: str, lo: date, hi: date, kind: str = "money") -> Lookup:
+    """Latest balance-sheet value (any form) dated within [lo, hi] - the fallback when a
+    concept is not reported at the anchored balance-sheet date."""
+    def lookup(tag: str) -> float | None:
+        raw = _latest_instant_between(_tag_facts(facts, tag, kind, currency), lo, hi)
+        return None if raw is None else _to_millions(raw, kind)
+    return lookup
+
+
+def _is_num(value) -> bool:
+    return value is not None and not pd.isna(value)
 
 
 # ------------------------------------------------------------------------------------------
@@ -695,8 +756,11 @@ def _finish_row(row: dict) -> dict:
             row[concept] = 0.0
     # EBITDA = operating income (EBIT) + depreciation & amortization (standard definition).
     row["ebitda"] = row["ebit"] + row["da"]
-    # Tangible book value = shareholders' equity - goodwill - other intangibles (bank convention).
-    row["tangible_book_value"] = row["total_equity"] - row["goodwill"] - row["intangibles"]
+    # Tangible book value = shareholders' equity - preferred stock - goodwill - other intangibles:
+    # tangible COMMON equity, so P/TBV (common market cap over it) is the per-common-share
+    # ratio bank comps quote. Preferred/goodwill/intangibles default to 0 when untagged.
+    row["tangible_book_value"] = (row["total_equity"] - row["preferred"]
+                                  - row["goodwill"] - row["intangibles"])
     return row
 
 
@@ -768,13 +832,46 @@ def _ttm_row(facts: dict, currency: str, latest_fy: dict, tags_used: dict, warni
         row[concept] = latest_fy[concept] + delta
         _record(tags_used, concept, ytd_end, label)
 
-    instant = _ttm_instant_lookup(facts, currency, e_fy, ytd_end)
+    # Share-basis check. A stock split between the latest 10-K and the latest 10-Q leaves
+    # the FY EPS in pre-split dollars while the 10-Q deltas are post-split (the 10-Q restates
+    # its comparatives), so the roll-forward would be wrong by the split ratio. When the
+    # diluted share count moved outside the +/-20-25% band, rebuild TTM EPS on the current
+    # share basis instead: TTM net income / latest diluted share count.
+    fy_shares, ttm_shares = latest_fy.get("diluted_shares"), row.get("diluted_shares")
+    if _is_num(fy_shares) and _is_num(ttm_shares) and fy_shares > 0 and ttm_shares > 0:
+        ratio = ttm_shares / fy_shares
+        if not (SHARE_BASIS_MIN_RATIO <= ratio <= SHARE_BASIS_MAX_RATIO):
+            if _is_num(row.get("net_income")):
+                row["eps_diluted"] = row["net_income"] / ttm_shares  # $mm / mm shares = $/share
+                _record(tags_used, "eps_diluted", ytd_end, "net_income/diluted_shares")
+            else:
+                row["eps_diluted"] = np.nan
+            warnings.append(
+                f"eps_diluted: diluted share count changed {ratio:.2f}x between the latest 10-K and "
+                "10-Q (stock split?); TTM EPS = TTM net income / latest diluted shares"
+            )
+
+    # Balance sheet: every item at the same (latest) balance-sheet date.
+    bs_date = _ttm_balance_sheet_date(facts, currency, e_fy, ytd_end)
+    if bs_date is None:
+        warnings.append(f"balance sheet: no balance sheet reported after {e_fy}; TTM balance-sheet items = FY")
+        return _finish_row(row)
+    instant = _ttm_instant_lookup(facts, currency, bs_date)
+    earlier = _ttm_latest_lookup(facts, currency, e_fy, bs_date)  # fallback: latest value before the anchor
     for concept in INSTANT_CONCEPTS:
         value, label = _first_available(CONCEPT_TAGS[concept], instant)
+        if value is None:
+            value, label = _first_available(CONCEPT_TAGS[concept], earlier)
+            if value is not None and value != 0:
+                warnings.append(f"{concept}: not reported at the {bs_date} balance sheet; using the latest earlier value")
         if value is not None:
             row[concept] = value
             _record(tags_used, concept, ytd_end, label)
     debt, label = _total_debt(instant)
+    if debt is None:
+        debt, label = _total_debt(earlier)
+        if debt is not None:
+            warnings.append(f"total_debt: no debt facts at the {bs_date} balance sheet; using the latest earlier value")
     if debt is not None:
         row["total_debt"] = debt
         _record(tags_used, "total_debt", ytd_end, label)
@@ -802,6 +899,21 @@ def extract_financials(facts: dict, n_years: int = 4) -> pd.DataFrame:
 
     rows = [_fy_row(facts, currency, end, fy, tags_used) for end, fy in periods]
     rows.append(_ttm_row(facts, currency, rows[-1], tags_used, warnings))
+
+    # A period with a balance sheet (cash or equity reported) but no debt element under any
+    # tag is treated as debt-free: total_debt = 0 so EV can be computed, with a warning so
+    # the reader verifies it (debt tagged under an element we do not read would be missed).
+    debt_free_periods = []
+    for r in rows:
+        if pd.isna(r["total_debt"]) and (_is_num(r["cash"]) or _is_num(r["total_equity"])):
+            r["total_debt"] = 0.0
+            debt_free_periods.append(r["period_end"])
+            tags_used.setdefault("total_debt", {})[r["period_end"]] = "none tagged (treated as debt-free)"
+    if debt_free_periods:
+        warnings.append(
+            "total_debt: no debt tag found (LongTermDebt, DebtCurrent, ShortTermBorrowings, "
+            f"CommercialPaper all absent) for {', '.join(debt_free_periods)}; treated as debt-free - verify"
+        )
 
     for concept in FLOW_CONCEPTS + INSTANT_CONCEPTS + ("total_debt",):
         if concept not in ZERO_WHEN_ABSENT and all(pd.isna(r[concept]) for r in rows):

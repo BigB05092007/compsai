@@ -230,3 +230,25 @@ def test_market_cli_offline(capsys):
     assert market.main(["FIXA", "--offline"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["market_cap"] == 3_000_000.0
+
+
+def test_yahoo_single_class_share_count_is_replaced_by_dei_total(online, tmp_cache_dir, monkeypatch):
+    """Multi-class issuers: Yahoo's share count covers only the quoted class (GOOGL ~5.8bn of
+    ~12.1bn), so a Yahoo figure well below the cover-page total is swapped for the dei sum."""
+    monkeypatch.setattr(market, "_fetch_yfinance", lambda t: {
+        "price": 160.0, "shares_outstanding": 5_830.0, "currency": "USD", "as_of": "2025-08-29"})
+    facts = _dei_facts([
+        {"end": "2025-07-15", "val": 5_830_000_000, "accn": "q", "fy": 2025, "fp": "Q2", "form": "10-Q", "filed": "2025-07-25"},
+        {"end": "2025-07-15", "val": 870_000_000, "accn": "q", "fy": 2025, "fp": "Q2", "form": "10-Q", "filed": "2025-07-25"},
+        {"end": "2025-07-15", "val": 5_430_000_000, "accn": "q", "fy": 2025, "fp": "Q2", "form": "10-Q", "filed": "2025-07-25"},
+    ])
+    data = get_market_data("MULTI", facts=facts)
+    assert data["shares_outstanding"] == 12_130.0
+    assert data["market_cap"] == pytest.approx(160.0 * 12_130.0)
+    assert data["source"] == "yfinance+xbrl"
+    # A buyback-sized gap (Yahoo 5,830 vs cover page 6,000, within 10%) leaves Yahoo's count alone.
+    facts_single = _dei_facts([
+        {"end": "2025-07-15", "val": 6_000_000_000, "accn": "q", "fy": 2025, "fp": "Q2", "form": "10-Q", "filed": "2025-07-25"},
+    ])
+    data = get_market_data("SINGLE", facts=facts_single)
+    assert data["shares_outstanding"] == 5_830.0 and data["source"] == "yfinance"
