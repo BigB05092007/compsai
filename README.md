@@ -92,68 +92,7 @@ Units everywhere: money in **USD millions**, share counts in **millions**, per-s
 USD, margins/growth as fractions, multiples as plain floats (12.3 = 12.3x). See
 [docs/DESIGN.md](docs/DESIGN.md) for the full interface contract.
 
-## Methodology (interview prep)
 
-**Enterprise value.**
-`EV = market cap + total debt + minority interest + preferred equity − cash`.
-EV is the price of the whole business for *all* capital providers. Market cap only pays the
-common shareholders; a buyer also inherits the debt (add it), owes the minority holders of
-consolidated subsidiaries and the preferred holders (add them), and gets the cash (subtract
-it — it can be used to pay down the debt on day one). Because EV belongs to all capital
-providers, it is compared with metrics that are also *before* interest: revenue and EBITDA.
-Equity value, by contrast, is compared with metrics *after* interest: net income / EPS and
-book value.
-
-**EV / Revenue.** How many dollars of enterprise value the market pays per dollar of sales.
-Useful when EBITDA is negative or distorted (early-stage software) and for a quick sanity
-check across sectors; blunt because it ignores margins.
-
-**EV / EBITDA.** The workhorse trading multiple. EBITDA = operating income + depreciation and
-amortisation approximates pre-tax operating cash flow, is unaffected by capital structure
-(before interest) and by tax jurisdiction (before tax), and by accounting choices about the
-useful lives of assets (before D&A). A higher multiple means the market expects more growth,
-better margins, or lower risk than the peers. It is meaningless when EBITDA ≤ 0 and suspect
-above ~100x, so those values are shown but excluded from the statistics.
-
-**P / E.** Share price ÷ diluted earnings per share (TTM). An *equity* multiple: what
-shareholders pay per dollar of the profit that belongs to them, after interest and tax.
-Distorted by leverage, one-time items and tax rates, which is why EV/EBITDA is usually the
-lead multiple for industrials — but P/E is what the press and most investors quote.
-
-**Banks: P / E and P / TBV.** For a bank, debt (deposits, borrowings) is the raw material
-of the business rather than a financing choice, so EV and EBITDA have no meaning. Banks are
-valued on equity metrics: P/E, and price to *tangible* book value — common equity minus
-goodwill and intangibles (preferred stock is taken out too, since the share price belongs to
-common holders), i.e. the hard capital the bank holds. A bank earning above its cost of
-equity trades above 1x TBV; the gap versus peers reflects return on tangible equity and
-risk.
-
-**Trailing twelve months (TTM).** The last four quarters, so every company is measured over
-the same recent window regardless of fiscal year end:
-`TTM = latest fiscal year + year-to-date this year − year-to-date last year`,
-taken from the newest 10-Q. Balance-sheet items (debt, cash) are simply the latest balance
-sheet.
-
-**Why outliers stay in the table but leave the statistics.** A negative EV/EBITDA or a 500x
-P/E is real information about that company (it lost money, or earnings collapsed) but it is
-not a benchmark; averaging it in would swing the median the whole analysis rests on. So the
-value is displayed with a note, and the mean/median/quartiles are computed only over
-"meaningful" values. The same rule is coded twice on purpose — in Python
-(`valuation.is_meaningful`) and in Excel (the stat-eligible helper columns) — so both agree.
-
-**Peer statistics and the football field.** Mean, median, 25th and 75th percentile of each
-multiple across the peers (the target is excluded from its own benchmark). The football
-field applies the 25th and 75th percentile multiples to the target's own metric — e.g.
-implied EV = peer EV/EBITDA × target EBITDA — then bridges back to an implied share price
-(EV − debt − minority − preferred + cash, ÷ shares). Each bar is the range of prices the
-peers imply; the current price line shows whether the stock sits inside it.
-
-**Grounded AI commentary.** Claude never sees a number it could invent: it is given the
-extracted MD&A / Risk Factors text and a table of the company's multiples versus the peer
-median, and must return JSON only. Every normalisation item carries a verbatim quote of
-fewer than 15 words; the code checks each quote against the filing and marks it
-`verified` (or not) in the Commentary sheet. The premium/discount view must cite the
-multiples table and the filing's own growth, margin and risk language.
 
 ## Project structure
 
@@ -208,11 +147,7 @@ in [DECISIONS.md](DECISIONS.md).
 
 ## Provenance
 
-Built with Claude Code from the brief in [`CLAUDE.md`](CLAUDE.md). The build history,
-adversarial review and CI runs are in
-[Winny-Math PR #16](https://github.com/BigB05092007/Winny-Math/pull/16); this repository is the
-`compsai/` folder of that branch split out with `git subtree`.
-
+Built with Claude Code from the brief in [`CLAUDE.md`](CLAUDE.md).
 ## License
 
 MIT — see [LICENSE](LICENSE).
