@@ -33,7 +33,7 @@ python scripts/make_screenshots.py     # LibreOffice renders the Comps sheet; Pl
 ## Quick start
 
 ```bash
-git clone <repo> && cd compsai
+git clone https://github.com/BigB05092007/compsai.git && cd compsai
 python -m venv .venv && source .venv/bin/activate      # or: uv venv && source .venv/bin/activate
 pip install -r requirements.txt                        # or: uv pip install -r requirements.txt
 cp .env.example .env                                   # then edit:
@@ -206,17 +206,12 @@ in [DECISIONS.md](DECISIONS.md).
 * **yfinance** is an unofficial Yahoo Finance client; when it fails, pass prices with
   `price_overrides` (pipeline) or enter them in the app.
 
-## Splitting into a standalone repository
+## Provenance
 
-This project currently lives in the `compsai/` folder of the Winny-Math repository. It is
-self-contained; to give it its own repository:
-
-```bash
-git subtree split -P compsai -b compsai-standalone
-git push git@github.com:<you>/compsai.git compsai-standalone:main
-```
-
-CI for it lives in `.github/workflows/compsai.yml` and can be copied across as-is.
+Built with Claude Code from the brief in [`CLAUDE.md`](CLAUDE.md). The build history,
+adversarial review and CI runs are in
+[Winny-Math PR #16](https://github.com/BigB05092007/Winny-Math/pull/16); this repository is the
+`compsai/` folder of that branch split out with `git subtree`.
 
 ## License
 

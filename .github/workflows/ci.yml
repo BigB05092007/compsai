@@ -1,0 +1,29 @@
+# CompsAI test suite: fully offline (bundled EDGAR fixtures, fake Anthropic client).
+# LibreOffice-backed recalculation tests skip automatically when soffice is absent.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tests:
+    name: Tests (pytest, offline)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run the offline test suite
+        env:
+          SEC_USER_AGENT: "CompsAI ci@example.com"
+        run: pytest -q
+      - name: Offline end-to-end run (writes a workbook from the bundled fixtures)
+        env:
+          SEC_USER_AGENT: "CompsAI ci@example.com"
+        run: python -m compsai.pipeline --tickers FIXA,FIXB,FIXC --target FIXA --offline --out /tmp/compsai-ci
